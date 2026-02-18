@@ -1,0 +1,24 @@
+-- =============================================================================
+-- 00_catalog.sql.tmpl — Iceberg Hadoop Catalog Init (CATALOG=hadoop)
+-- =============================================================================
+-- Rendered by scripts/render_sql.py from environment variables.
+-- Sets up the Iceberg catalog and creates bronze + silver databases.
+-- Session runtime mode and dml-sync are NOT set here — see 01_source.sql.tmpl.
+-- =============================================================================
+
+CREATE CATALOG IF NOT EXISTS iceberg_catalog WITH (
+    'type'                = 'iceberg',
+    'catalog-type'        = 'hadoop',
+    'warehouse'           = '${WAREHOUSE}',
+    'io-impl'             = 'org.apache.iceberg.aws.s3.S3FileIO',
+    'fs.s3a.endpoint'     = '${S3_ENDPOINT}',
+    'fs.s3a.path.style.access' = '${S3_PATH_STYLE}',
+    'fs.s3a.connection.ssl.enabled' = '${S3_USE_SSL}',
+    'fs.s3a.access.key'   = '${AWS_ACCESS_KEY_ID}',
+    'fs.s3a.secret.key'   = '${AWS_SECRET_ACCESS_KEY}'
+);
+
+USE CATALOG iceberg_catalog;
+
+CREATE DATABASE IF NOT EXISTS bronze;
+CREATE DATABASE IF NOT EXISTS silver;

@@ -1,0 +1,35 @@
+-- =============================================================================
+-- 07_streaming_bronze.sql.tmpl — Streaming Bronze (continuous Kafka → Iceberg)
+-- =============================================================================
+-- Continuously reads from Kafka and appends to Iceberg bronze table.
+-- Runs indefinitely — cancel from Flink Dashboard or via Ctrl+C.
+-- Use: make process-streaming (after make build-sql with MODE=streaming_bronze)
+--
+-- This job must be submitted AFTER bronze table is created (run 05_bronze first
+-- in batch mode once, or CREATE TABLE IF NOT EXISTS is idempotent).
+-- =============================================================================
+
+-- Insert stream: parse raw timestamps, append continuously
+INSERT INTO iceberg_catalog.bronze.raw_trips
+SELECT
+    vendor_id,
+    TO_TIMESTAMP(tpep_pickup_datetime,  'yyyy-MM-dd HH:mm:ss') AS tpep_pickup_datetime,
+    TO_TIMESTAMP(tpep_dropoff_datetime, 'yyyy-MM-dd HH:mm:ss') AS tpep_dropoff_datetime,
+    passenger_count,
+    trip_distance,
+    rate_code_id,
+    store_and_fwd_flag,
+    pu_location_id,
+    do_location_id,
+    payment_type,
+    fare_amount,
+    extra,
+    mta_tax,
+    tip_amount,
+    tolls_amount,
+    improvement_surcharge,
+    total_amount,
+    congestion_surcharge,
+    airport_fee,
+    CURRENT_TIMESTAMP AS ingestion_ts
+FROM kafka_raw_trips;
