@@ -5,7 +5,8 @@ A self-contained template for building **batch and real-time data pipelines** on
 
 Works out of the box with **Redpanda** (default) or **Kafka**. Stores data in **MinIO** locally
 or **AWS S3 / GCS / Azure** in the cloud. Ships with 16 dbt models as a working reference.
-Designed to be adapted for any tabular dataset.
+Designed to be adapted for any tabular dataset — scaffold a new dataset from a YAML manifest
+in under 30 seconds.
 
 ---
 
@@ -46,6 +47,52 @@ Designed to be adapted for any tabular dataset.
 
 ---
 
+## Quick Start (Local — 5 Minutes to Running)
+
+```bash
+# 1. One-time setup
+make setup-dev                            # install Python deps into .venv
+
+# 2. Activate the local profile (MinIO + Redpanda)
+make env-select ENV=env/local.env
+
+# 3. Put your Parquet file in place (default: ../data/ relative to this repo)
+mkdir -p ../data && cp /path/to/your_file.parquet ../data/
+
+# 4. Start infrastructure
+make up                                   # validates config, renders SQL, starts Docker
+
+# 5. Create broker topics
+make create-topics
+
+# 6. Load data into the broker
+make generate-limited                     # 10,000 events (smoke test)
+# make generate                           # full dataset (all rows)
+
+# 7. Run Flink batch jobs (Bronze → Silver)
+make process                              # blocks until both jobs finish
+
+# 8. Build dbt models
+make wait-for-silver && make dbt-build
+
+# 9. Validate
+make validate                             # 4-stage smoke test
+```
+
+**Scaffold your own dataset (skip manual SQL editing):**
+
+```bash
+# Create a dataset manifest for your data
+cp -r datasets/taxi datasets/orders       # start from the reference example
+$EDITOR datasets/orders/dataset.yml       # describe your schema
+
+# Generate SQL templates + dbt staging model automatically
+make scaffold DATASET=orders
+make build-sql
+```
+
+---
+
 ## Prerequisites
 
 | Requirement | Version | Notes |
@@ -63,7 +110,7 @@ Designed to be adapted for any tabular dataset.
 ## Developer Setup
 
 ```bash
-# Install Python deps into .venv (pydantic-settings + pytest)
+# Install Python deps into .venv (pydantic-settings, pytest, ruff, pyright, jinja2, pyyaml)
 make setup-dev
 
 # Verify
@@ -239,11 +286,33 @@ make generate           # full dataset (all rows in the Parquet file)
 |----------|-------------|---------|
 | Smoke test (fast) | `10000` | `make generate-limited` |
 | Full load | `0` (all) | `make generate` |
-| Custom count | `50000` | `make generate-limited` with `MAX_EVENTS=50000` in `.env` |
+| Custom count | `50000` | `MAX_EVENTS=50000` in `.env` + `make generate` |
 
 `DLQ_MAX` in `.env` sets how many DLQ messages are tolerated before `make validate` fails.
 Default is `0` — any malformed record sent to the DLQ causes validation to fail. Raise this
 only if your data has known bad rows you choose to tolerate.
+
+**Optional: enable schema validation (data contracts at the edge)**
+
+By default, the generator produces every row without validation. To enforce the JSON Schema
+in `schemas/taxi_trip.json` before rows enter the broker:
+
+```ini
+# In .env:
+VALIDATE_SCHEMA=true
+SCHEMA_PATH=/schemas/taxi_trip.json   # default — update for your schema
+DLQ_MAX=0                             # fail validate if any row is rejected
+```
+
+With validation enabled:
+- Each row is checked against the JSON Schema before producing.
+- Invalid rows go to `DLQ_TOPIC` with an error envelope: `{error, row, timestamp}`.
+- The generator prints a summary: `Events produced: N / Invalid (→ DLQ): M`.
+- `make validate` Stage 3 checks that `DLQ count ≤ DLQ_MAX`.
+
+When to enable: when your source data may have schema drift (nullable columns becoming
+required, numeric fields arriving as strings, etc.). Keeps the DLQ auditable and the
+broker topic clean.
 
 ### Step 7 — Process: Bronze Layer
 
@@ -556,8 +625,88 @@ make process-streaming                      # start continuous job
 
 ## Adapting for Your Dataset
 
-Replace the NYC Taxi example with your own data. The infrastructure stays identical.
-You modify **4 files**:
+Replace the NYC Taxi example with your own data. The recommended path is to use the
+**scaffold system**, which generates all four files from a YAML manifest.
+
+### Option A: Scaffold from a manifest (recommended)
+
+```bash
+# 1. Create a dataset directory with a manifest
+mkdir datasets/orders
+$EDITOR datasets/orders/dataset.yml
+```
+
+The manifest describes your schema, topic, and data quality rules:
+
+```yaml
+# datasets/orders/dataset.yml
+name: orders
+topic: "${TOPIC}"
+dlq_topic: "${DLQ_TOPIC}"
+bronze_table: bronze.raw_orders
+silver_table: silver.cleaned_orders
+event_ts_col: created_at
+ts_format: "yyyy-MM-dd''T''HH:mm:ss"
+partition_date_col: order_date
+partition_date_expr: "CAST(created_at AS DATE)"
+
+columns:
+  - name: order_id
+    kafka_type: STRING
+    bronze_type: STRING
+    silver_name: order_id
+    silver_type: STRING
+    is_event_ts: false
+
+  - name: created_at
+    kafka_type: STRING
+    bronze_type: TIMESTAMP(3)
+    silver_name: created_at
+    silver_type: "TIMESTAMP(3)"
+    is_event_ts: true          # marks this as the watermark/event-time column
+
+  - name: total_amount
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: total_amount
+    silver_type: "DECIMAL(10, 2)"
+    comment: "Order total in USD"
+
+  # ... all other columns
+
+dedup_key:
+  - order_id
+  - created_at
+
+quality_filters:
+  - "created_at IS NOT NULL"
+  - "total_amount > 0"
+
+surrogate_key_fields:
+  - order_id
+  - created_at
+```
+
+```bash
+# 2. Generate SQL + dbt files
+make scaffold DATASET=orders
+
+# Output:
+#   wrote  flink/sql/05_bronze_batch.sql.tmpl
+#   wrote  flink/sql/06_silver.sql.tmpl
+#   wrote  flink/sql/07_bronze_streaming.sql.tmpl
+#   wrote  dbt/models/staging/stg_orders.sql
+
+# 3. Render templates to build/
+make build-sql
+
+# 4. Verify the generated SQL looks correct
+make show-sql
+```
+
+### Option B: Edit templates manually
+
+If you need custom logic beyond what the scaffold generates, edit the templates directly:
 
 | # | File | What to change |
 |---|------|---------------|
@@ -641,6 +790,98 @@ instead of `00_catalog.sql`. See [docs/01_stack_overview.md](docs/01_stack_overv
 
 ---
 
+## Observability (Prometheus + Grafana)
+
+The observability stack is optional. Start it alongside the main pipeline:
+
+```bash
+# Start main pipeline (if not already running)
+make up
+
+# Add Prometheus + Grafana
+make obs-up
+```
+
+After startup:
+
+```
+Grafana:    http://localhost:3000  (admin/admin)
+Prometheus: http://localhost:9090
+```
+
+The Grafana **Flink Pipeline** dashboard opens automatically as the default home dashboard
+(provisioned from `infra/grafana/dashboards/flink_pipeline.json`). It shows:
+
+| Panel | Metric | Notes |
+|-------|--------|-------|
+| Running Jobs | `flink_jobmanager_numRunningJobs` | Red=0, Green≥1 |
+| Last Checkpoint Duration | `flink_jobmanager_job_lastCheckpointDuration` | Yellow>5s, Red>30s |
+| Failed Checkpoints | `flink_jobmanager_job_numberOfFailedCheckpoints` | Red≥1 |
+| TaskManagers | `flink_jobmanager_numRegisteredTaskManagers` | Red=0, Green≥1 |
+| Records In/Out per Second | `flink_taskmanager_job_task_numRecordsIn/OutPerSecond` | Timeseries |
+| JVM Heap Usage | Heap used / Heap max × 100 | Yellow>70%, Red>90% |
+| Checkpoint Duration History | Last duration + size | Timeseries |
+| Task Slots | Total vs available | Timeseries |
+
+**How it works:** Flink's JobManager exposes Prometheus metrics on port `9249` (configured in
+`flink/conf/config.yaml`). Prometheus scrapes every 15 seconds. The Grafana datasource and
+dashboard are provisioned automatically from `infra/grafana/provisioning/` — no manual
+setup required.
+
+**Customizing the dashboard:**
+Edit `infra/grafana/dashboards/flink_pipeline.json` directly, or save a modified version
+from the Grafana UI (dashboard → Save → overwrite the JSON file).
+
+```bash
+# Stop observability stack only (pipeline keeps running)
+make obs-down
+
+# Restart with fresh Grafana state
+make obs-down && make obs-up
+```
+
+---
+
+## Code Quality & CI
+
+### Local pre-push checks
+
+```bash
+make fmt     # auto-format with ruff (modifies files)
+make lint    # lint with ruff, auto-fix safe violations
+make type    # type-check with pyright
+make ci      # lint + type + test-unit (fast pre-push gate)
+```
+
+All three tools are configured in `pyproject.toml`:
+- **ruff**: line-length=100, select E/F/I/UP/W, ignore E501
+- **pyright**: strict import resolution via `.venv`
+- **pre-commit**: ruff + standard hooks (trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict)
+
+To install pre-commit hooks (optional — runs `make lint` on every `git commit`):
+```bash
+uv run pre-commit install
+```
+
+### GitHub Actions CI
+
+Two workflows ship with the template:
+
+**`.github/workflows/ci.yml`** — Runs on every push and pull request to `main`:
+1. `uv run pytest tests/unit/ -v` — 40 unit tests (no Docker)
+2. `uv run ruff check .` — lint
+3. `uv run ruff format --check .` — format check
+4. `uv run pyright` — type check
+5. SQL render smoke test — copies `env/local.env` to `.env` and renders all templates
+
+**`.github/workflows/e2e.yml`** — Runs nightly (02:00 UTC) and on `workflow_dispatch`:
+1. Generates a 100-row deterministic Parquet fixture (`tests/fixtures/make_parquet.py`)
+2. Starts the Docker stack (MinIO + Redpanda + Flink)
+3. Produces 100 events, runs Bronze + Silver Flink jobs, runs dbt, runs `make validate`
+4. Tears down (`make down`)
+
+---
+
 ## Testing
 
 ```bash
@@ -675,13 +916,24 @@ make test-integration
 - Phase 4 (slow, marked `@pytest.mark.slow`): full Docker stack — up → topics → generate →
   process → wait → dbt → validate → down
 
+### CI fixture generator
+
+`tests/fixtures/make_parquet.py` generates a 100-row, deterministic NYC Taxi Parquet file
+for use in CI without committing binary data. Seed is fixed (42) so the file is identical
+across runs:
+
+```bash
+uv run python tests/fixtures/make_parquet.py
+# Written: tests/fixtures/taxi_fixture.parquet  (100 rows, ~12KB)
+```
+
 ---
 
 ## Make Targets Reference
 
 ```bash
 # ── Setup ───────────────────────────────────────────────────────────────────
-make setup-dev           # uv sync — create .venv and install deps
+make setup-dev           # uv sync — create .venv and install all deps
 
 # ── Config ──────────────────────────────────────────────────────────────────
 make env-select ENV=env/local.env  # activate an env profile
@@ -699,12 +951,15 @@ make restart             # down + up
 make build-sql           # render *.sql.tmpl → build/sql/*.sql + build/conf/core-site.xml
 make show-sql            # print rendered SQL + active config
 
+# ── Dataset Scaffold ──────────────────────────────────────────────────────────
+make scaffold DATASET=taxi     # generate SQL + dbt files from datasets/taxi/dataset.yml
+
 # ── Topics ───────────────────────────────────────────────────────────────────
 make create-topics       # create primary + DLQ topics (BROKER-aware)
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 make generate            # produce all events (full Parquet file)
-make generate-limited    # produce MAX_EVENTS=10000 events (smoke test)
+make generate-limited    # produce 10,000 events (smoke test)
 
 # ── Processing ───────────────────────────────────────────────────────────────
 make process             # batch: process-bronze + process-silver (blocking)
@@ -730,10 +985,20 @@ make dbt-docs            # dbt docs generate
 make validate            # 4-stage smoke test (bash)
 make validate-py         # 4-stage smoke test (Python, via uv)
 
+# ── Code Quality ──────────────────────────────────────────────────────────────
+make fmt                 # auto-format all Python files (ruff format)
+make lint                # lint + auto-fix safe violations (ruff check --fix)
+make type                # type-check all Python files (pyright)
+make ci                  # lint + type + test-unit — fast pre-push gate
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 make test                # alias for test-unit
 make test-unit           # unit tests, no Docker (< 1s)
 make test-integration    # E2E integration tests (requires Docker, ~5 min)
+
+# ── Observability ────────────────────────────────────────────────────────────
+make obs-up              # start Prometheus + Grafana (auto-provisioned dashboard)
+make obs-down            # stop Prometheus + Grafana
 
 # ── Iceberg Maintenance ───────────────────────────────────────────────────────
 make compact-silver      # merge small files to 128MB target
@@ -760,19 +1025,25 @@ make ps                  # docker compose ps
 de_template/
 │
 ├── .env.example               ← example config (local MinIO defaults)
+├── .gitignore                 ← .env.* denied; env/*.env committed; *.parquet denied
+├── .pre-commit-config.yaml    ← ruff + standard hooks
 ├── Makefile                   ← all make targets
-├── pyproject.toml             ← Python deps (pydantic-settings, pytest) + pytest config
+├── pyproject.toml             ← Python deps + pytest + ruff + pyright config
 ├── pyrightconfig.json         ← IDE import resolution (points Pyright at .venv)
 ├── uv.lock                    ← committed for reproducible installs
 ├── CHANGES.log                ← change log
+│
+├── .github/
+│   └── workflows/
+│       ├── ci.yml             ← PR gate: unit tests + lint + type + render smoke
+│       └── e2e.yml            ← nightly/manual: full Docker stack E2E test
 │
 ├── env/                       ← env profiles (committed — templates, not secrets)
 │   ├── local.env              ← MinIO + Redpanda (default)
 │   ├── local_kafka.env        ← MinIO + Kafka
 │   ├── aws.env                ← AWS S3 (IAM auth)
 │   ├── gcs.env                ← Google Cloud Storage
-│   ├── azure.env              ← Azure ADLS Gen2
-│   └── README.md              ← profile reference table
+│   └── azure.env              ← Azure ADLS Gen2
 │
 ├── config/
 │   ├── __init__.py
@@ -780,16 +1051,32 @@ de_template/
 │                                 Settings() = pure validation (kwargs only, no env bleed)
 │                                 load_settings() = reads .env + os.environ → Settings()
 │
+├── datasets/                  ← dataset manifests + Jinja2 scaffold templates
+│   ├── taxi/
+│   │   └── dataset.yml        ← reference manifest (NYC Yellow Taxi, 19 columns)
+│   └── _template/
+│       ├── bronze.sql.j2      ← → flink/sql/05_bronze_batch.sql.tmpl
+│       ├── silver.sql.j2      ← → flink/sql/06_silver.sql.tmpl
+│       ├── streaming.sql.j2   ← → flink/sql/07_bronze_streaming.sql.tmpl
+│       └── stg.sql.j2         ← → dbt/models/staging/stg_<name>.sql
+│
 ├── infra/                     ← Docker Compose overlays (assembled per axis)
 │   ├── base.yml               ← Flink JM+TM + dbt + generator (always loaded)
 │   ├── broker.redpanda.yml    ← Redpanda v25.3.7
 │   ├── broker.kafka.yml       ← Kafka 4.0.0 (KRaft)
 │   ├── storage.minio.yml      ← MinIO + mc-init (STORAGE=minio only)
 │   ├── catalog.rest-lakekeeper.yml  ← Lakekeeper REST catalog (--profile catalog-rest)
-│   └── observability.optional.yml   ← Prometheus + Grafana (--profile obs)
+│   ├── observability.optional.yml   ← Prometheus + Grafana (--profile obs)
+│   ├── prometheus.yml         ← Prometheus scrape config (Flink JM :9249)
+│   └── grafana/
+│       ├── provisioning/
+│       │   ├── datasources/prometheus.yml  ← auto-provisions Prometheus datasource
+│       │   └── dashboards/dashboards.yml   ← tells Grafana where to load dashboards
+│       └── dashboards/
+│           └── flink_pipeline.json         ← 8-panel Flink metrics dashboard
 │
 ├── docker/
-│   ├── flink.Dockerfile       ← Flink 2.0.1 + JARs (Iceberg, Kafka, S3A)
+│   ├── flink.Dockerfile       ← Flink 2.0.1 + JARs (Iceberg, Kafka, S3A) + curl
 │   └── dbt.Dockerfile         ← Python 3.12 + dbt-duckdb + pyarrow
 │
 ├── flink/
@@ -808,14 +1095,16 @@ de_template/
 │
 ├── generator/
 │   ├── generator.py           ← Parquet → Kafka producer (burst/realtime/batch modes)
+│   │                             opt-in schema validation: VALIDATE_SCHEMA=true
 │   ├── Dockerfile
 │   └── requirements.txt
 │
 ├── schemas/
-│   └── taxi_trip.json         ← JSON Schema (update for your dataset)
+│   └── taxi_trip.json         ← JSON Schema for VALIDATE_SCHEMA=true (update for your dataset)
 │
 ├── scripts/
 │   ├── render_sql.py          ← strict template renderer (fails on unsubstituted ${VAR})
+│   ├── scaffold_dataset.py    ← generates SQL + dbt files from datasets/<name>/dataset.yml
 │   ├── validate.py            ← Python 4-stage smoke test (importable by integration tests)
 │   ├── validate.sh            ← bash 4-stage smoke test (used by make validate)
 │   ├── wait_for_iceberg.py    ← polling gate: Silver rows > 0, 90s timeout
@@ -844,6 +1133,8 @@ de_template/
 │
 ├── tests/
 │   ├── conftest.py            ← adds project root to sys.path
+│   ├── fixtures/
+│   │   └── make_parquet.py    ← generates 100-row deterministic taxi fixture for CI
 │   ├── unit/
 │   │   ├── test_settings.py   ← 20 settings validation tests (no Docker)
 │   │   └── test_render_sql.py ← 16 SQL template rendering tests (no Docker)
@@ -884,6 +1175,8 @@ de_template/
 | MinIO | RELEASE.2025-04-22 |
 | Python | ≥3.11 |
 | pydantic-settings | ≥2.0 |
+| Grafana | 10.3.1 |
+| Prometheus | 2.50.1 |
 
 ---
 
@@ -900,6 +1193,7 @@ de_template/
 | CPU limits: TM 2.0, JM 1.0 | `infra/base.yml` |
 | Polling gate instead of `sleep N` for Silver readiness | `scripts/wait_for_iceberg.py` |
 | DLQ topic with configurable `DLQ_MAX` threshold | Makefile + `scripts/validate.sh` |
+| Opt-in JSON Schema validation — invalid rows → DLQ | `generator/generator.py` |
 | Flink restart-count check in validate | `scripts/validate.sh` Stage 2 |
 | Iceberg snapshot metadata committed check | `scripts/validate.sh` Stage 3 |
 | `allow_moved_paths=true` in `iceberg_scan` | `dbt/models/sources/sources.yml` |
@@ -912,6 +1206,11 @@ de_template/
 | Pydantic Settings contract — all env vars validated at startup | `config/settings.py` |
 | Unit tests isolated from os.environ (settings_customise_sources) | `config/settings.py` |
 | Cross-platform env activation (Python shutil, not cp) | Makefile `env-select` |
+| No dangerous credential defaults (no `:-minioadmin` fallback) | `infra/base.yml` |
+| `COMPOSE_PROJECT_NAME` isolation — multiple stacks on same host | Makefile |
+| Jinja2 scaffold + YAML manifest — 30-second dataset onboarding | `datasets/` + `scripts/scaffold_dataset.py` |
+| Grafana dashboard provisioned as code — zero manual setup | `infra/grafana/` |
+| GitHub Actions CI — PR gate + nightly E2E with Parquet fixture | `.github/workflows/` |
 
 ---
 
@@ -939,8 +1238,17 @@ The Python generator uses `datetime.isoformat()` which always produces the T for
 **Streaming job not processing — checkpoint failing**
 Check Flink Dashboard → Jobs → your job → Checkpoints tab. If checkpoints are failing,
 look at the TaskManager logs (`make logs-flink-tm`) for S3 connectivity errors. For MinIO,
-verify `S3_ENDPOINT=http://minio:9000` (not `localhost`  — the container hostname is `minio`).
+verify `S3_ENDPOINT=http://minio:9000` (not `localhost` — the container hostname is `minio`).
 
-**IDE import errors for pydantic**
+**IDE import errors for pydantic / yaml / jinja2**
 The IDE is using global Python, not `.venv`. `pyrightconfig.json` is already present — reload
 the VS Code window or explicitly select the `.venv/Scripts/python.exe` interpreter.
+
+**Scaffold comma errors in generated SQL**
+The scaffold system always emits a trailing comma after every Bronze column (because
+`ingestion_ts` always follows). If you add custom columns manually after scaffolding, follow
+the same pattern: every column in the DDL except `ingestion_ts` gets a trailing comma.
+
+**Parallel stacks on the same Docker host**
+By default, `COMPOSE_PROJECT_NAME=de_template`. Two checkouts would collide on container
+and network names. Run with a different name: `COMPOSE_PROJECT_NAME=de_v2 make up`.
