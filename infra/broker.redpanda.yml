@@ -5,7 +5,7 @@ services:
   # Both broker overlays expose hostname=broker on internal port 9092.
   # Flink SQL 01_source.sql always uses 'broker:9092' — zero changes between brokers.
   broker:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.7
     container_name: template-redpanda
     hostname: broker
     command:
@@ -27,13 +27,13 @@ services:
       - "18082:18082"   # HTTP Proxy
       - "9644:9644"     # Admin API
     healthcheck:
-      test:
-        - CMD-SHELL
-        - rpk cluster health --brokers localhost:9092 | grep -q "Healthy"
+      # rpk v25+: --brokers flag removed from cluster health subcommand;
+      # reads broker from node's own config. grep -E checks value=true, not just key presence.
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 12
-      start_period: 30s
+      retries: 15
+      start_period: 20s
     networks:
       - pipeline-net
 
@@ -41,7 +41,7 @@ services:
   # Redpanda Console (web UI for topic inspection)
   # =============================================================================
   redpanda-console:
-    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    image: docker.redpanda.com/redpandadata/console:v3.2.2
     container_name: template-redpanda-console
     entrypoint: /bin/sh
     command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console --config.filepath /tmp/config.yml'

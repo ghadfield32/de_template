@@ -5,9 +5,8 @@
 -- Sets streaming execution mode (no table.dml-sync — jobs run indefinitely).
 -- No scan.bounded.mode — reads continuously from Kafka.
 --
--- CUSTOMIZE THIS FILE for a new dataset:
---   Same column list customization as 01_source.sql.tmpl.
---   Keep this file in sync with 01_source.sql.tmpl for columns.
+-- Keep this file in sync with 01_source.sql.tmpl for column definitions.
+-- Same CRITICAL notes apply: column names match JSON keys exactly, T-format timestamps.
 -- =============================================================================
 
 -- Streaming session settings (jobs run indefinitely)
@@ -15,16 +14,16 @@ SET 'execution.runtime-mode' = 'streaming';
 
 -- Kafka source: unbounded stream (no scan.bounded.mode)
 CREATE TABLE IF NOT EXISTS kafka_raw_trips (
-    -- NYC Yellow Taxi fields (replace with your dataset's JSON fields)
-    vendor_id               STRING,
-    tpep_pickup_datetime    STRING,
-    tpep_dropoff_datetime   STRING,
+    -- NYC Yellow Taxi fields — names match Parquet column names / JSON keys EXACTLY
+    VendorID                BIGINT,          -- JSON key: "VendorID"
+    tpep_pickup_datetime    STRING,          -- raw ISO timestamp: "2024-01-01T00:32:47"
+    tpep_dropoff_datetime   STRING,          -- raw ISO timestamp
     passenger_count         BIGINT,
     trip_distance           DOUBLE,
-    rate_code_id            BIGINT,
+    RatecodeID              BIGINT,          -- JSON key: "RatecodeID"
     store_and_fwd_flag      STRING,
-    pu_location_id          BIGINT,
-    do_location_id          BIGINT,
+    PULocationID            BIGINT,          -- JSON key: "PULocationID"
+    DOLocationID            BIGINT,          -- JSON key: "DOLocationID"
     payment_type            BIGINT,
     fare_amount             DOUBLE,
     extra                   DOUBLE,
@@ -34,10 +33,10 @@ CREATE TABLE IF NOT EXISTS kafka_raw_trips (
     improvement_surcharge   DOUBLE,
     total_amount            DOUBLE,
     congestion_surcharge    DOUBLE,
-    airport_fee             DOUBLE,
+    Airport_fee             DOUBLE,          -- JSON key: "Airport_fee"
 
     -- Computed: event time for watermarking
-    event_time AS TO_TIMESTAMP(tpep_pickup_datetime, 'yyyy-MM-dd HH:mm:ss'),
+    event_time AS TO_TIMESTAMP(tpep_pickup_datetime, 'yyyy-MM-dd''T''HH:mm:ss'),
     WATERMARK FOR event_time AS event_time - INTERVAL '10' SECOND
 ) WITH (
     'connector'                     = 'kafka',

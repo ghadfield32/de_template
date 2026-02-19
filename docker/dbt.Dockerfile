@@ -18,10 +18,8 @@ RUN if [ "$DBT_ADAPTER" = "dbt-duckdb" ]; then \
     pip install --no-cache-dir duckdb; \
     fi
 
-# Copy dbt project at build time
-# Note: ./dbt/ is mounted at runtime via volume (./dbt:/dbt)
-# so this COPY is only for non-mounted builds
-COPY dbt/ /dbt/
+# dbt project files are mounted at runtime via volume (../dbt:/dbt in base.yml).
+# No COPY needed — the build context is docker/ which does not contain dbt/.
 
 ENTRYPOINT ["dbt"]
 CMD ["build", "--profiles-dir", "."]

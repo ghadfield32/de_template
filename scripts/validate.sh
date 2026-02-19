@@ -66,7 +66,9 @@ echo "╚═══════════════════════�
 section 1 "Infrastructure Health"
 
 if [ "$BROKER" = "redpanda" ]; then
-    if $COMPOSE exec -T broker rpk cluster health --brokers localhost:9092 2>/dev/null | grep -q "Healthy"; then
+    # rpk v25+: --brokers flag removed from rpk cluster health; reads from node config.
+    # grep -E 'Healthy:.+true' checks the value (not just the key name).
+    if $COMPOSE exec -T broker rpk cluster health 2>/dev/null | grep -qE 'Healthy:.+true'; then
         pass "Redpanda: healthy"
     else
         fail "Redpanda: not healthy (rpk cluster health failed)"
@@ -117,6 +119,23 @@ if [ "$MODE" = "streaming_bronze" ]; then
     else
         fail "Flink streaming: expected >=1 RUNNING job, found $RUNNING (check Dashboard → Jobs)"
     fi
+
+    # Streaming stability: check restart count on each RUNNING job
+    RUNNING_IDS=$(echo "$JOBS_JSON" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(' '.join(j['jid'] for j in d.get('jobs',[]) if j.get('state')=='RUNNING'))
+" 2>/dev/null || echo "")
+    for jid in $RUNNING_IDS; do
+        RESTARTS=$(curl -s "http://localhost:8081/jobs/${jid}" 2>/dev/null | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('numRestarts',0))" \
+            2>/dev/null || echo "0")
+        if [ "${RESTARTS:-0}" -eq 0 ]; then
+            pass "Flink job ${jid:0:8}...: 0 restarts (stable)"
+        else
+            fail "Flink job ${jid:0:8}...: $RESTARTS restart(s) — job is unstable, check TM logs"
+        fi
+    done
 else
     if [ "$FINISHED" -ge 2 ]; then
         pass "Flink batch: $FINISHED job(s) FINISHED (bronze + silver)"
@@ -131,10 +150,10 @@ fi
 section 3 "Row Counts"
 
 # Read events_produced from generator metrics volume
+# Note: docker compose run always works for services with profiles (no --profile needed)
 EVENTS_PRODUCED=$(
     $COMPOSE run --rm --no-deps \
         --entrypoint python3 \
-        --profile dbt \
         dbt - <<'PYEOF' 2>/dev/null
 import json, sys, os
 try:
@@ -159,11 +178,9 @@ fi
 COUNT_RESULT=$(
     $COMPOSE run --rm --no-deps \
         --entrypoint python3 \
-        --profile dbt \
         dbt /scripts/wait_for_iceberg.py 2>/dev/null
     $COMPOSE run --rm --no-deps \
         --entrypoint python3 \
-        --profile dbt \
         dbt - <<'PYEOF' 2>/dev/null
 import duckdb, os, sys
 
@@ -228,6 +245,46 @@ else
     fail "Silver ($SILVER) > bronze ($BRONZE) — impossible, investigate"
 fi
 
+# Iceberg metadata health: verify Silver table has committed snapshot metadata
+# An iceberg_scan() returning rows already proves metadata exists, but this
+# check explicitly confirms the metadata/ folder (catches partial commits).
+ICEBERG_META=$(
+    $COMPOSE run --rm --no-deps \
+        --entrypoint python3 \
+        dbt - <<'PYEOF' 2>/dev/null
+import duckdb, os, sys
+
+endpoint = os.environ.get('DUCKDB_S3_ENDPOINT', 'minio:9000')
+key = os.environ.get('AWS_ACCESS_KEY_ID', 'minioadmin')
+secret = os.environ.get('AWS_SECRET_ACCESS_KEY', 'minioadmin')
+use_ssl = os.environ.get('DUCKDB_S3_USE_SSL', 'false').lower() == 'true'
+
+con = duckdb.connect()
+try:
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(f"SET s3_endpoint='{endpoint}';")
+    con.execute(f"SET s3_access_key_id='{key}';")
+    con.execute(f"SET s3_secret_access_key='{secret}';")
+    con.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'};")
+    con.execute("SET s3_url_style='path';")
+    r = con.execute(
+        "SELECT count(*) FROM glob("
+        "'s3://warehouse/silver/cleaned_trips/metadata/*.json')"
+    ).fetchone()
+    print(r[0] if r else 0)
+except Exception:
+    print(0)
+finally:
+    con.close()
+PYEOF
+)
+ICEBERG_META=$(echo "$ICEBERG_META" | tr -d '[:space:]')
+if [ "${ICEBERG_META:-0}" -gt 0 ]; then
+    pass "Iceberg metadata: $ICEBERG_META snapshot file(s) committed"
+else
+    fail "Iceberg metadata: no snapshot metadata found in silver/cleaned_trips/metadata/"
+fi
+
 # DLQ check
 DLQ_COUNT=0
 if [ "$BROKER" = "redpanda" ]; then
@@ -260,7 +317,6 @@ section 4 "dbt Test"
 DBT_EXIT=0
 $COMPOSE run --rm --no-deps \
     --entrypoint /bin/sh \
-    --profile dbt \
     dbt -c "dbt test --profiles-dir . 2>&1" || DBT_EXIT=$?
 
 if [ "$DBT_EXIT" -eq 0 ]; then

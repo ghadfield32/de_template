@@ -1,0 +1,53 @@
+[project]
+name = "de-template"
+version = "0.1.0"
+description = "Data engineering lakehouse pipeline template (Flink + Iceberg + dbt)"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Host-side runtime deps — config validation and pipeline scripts.
+# Docker containers manage their own runtime deps independently.
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4",
+    "pytest-timeout>=2.0",
+    "pytest-sugar>=0.9",
+]
+
+# =============================================================================
+# pytest configuration (replaces pytest.ini)
+# =============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Makes `from config.settings import ...` and `from scripts.health import ...`
+# importable without installing the project as a package.
+pythonpath = ["."]
+
+markers = [
+    "integration: full pipeline tests requiring Docker (deselect with -m 'not integration')",
+    "slow: tests that take >60s (usually E2E Docker tests)",
+]
+
+# Show short tracebacks by default; use --tb=long for debugging
+addopts = "--tb=short"
+
+# Default timeout per test (seconds).
+# Integration tests can override per-class with @pytest.mark.timeout(N).
+timeout = 60
+
+# =============================================================================
+# uv configuration
+# =============================================================================
+[tool.uv]
+# Keep .venv inside the project root for IDE discoverability
+# (most editors auto-detect .venv at the project root)
+package = false   # this is a scripts-only project, not a distributable package

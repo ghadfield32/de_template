@@ -1,0 +1,62 @@
+"""
+scripts/health/dbt_check.py — dbt test health check.
+
+Runs `dbt test` inside the dbt container and checks the exit code.
+"""
+from __future__ import annotations
+
+import subprocess
+from typing import TYPE_CHECKING
+
+from scripts.health import CheckResult
+
+if TYPE_CHECKING:
+    from config.settings import Settings
+
+STAGE = "4-dbt-tests"
+
+
+def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:  # noqa: ARG001
+    return [_run_dbt_test(compose_args)]
+
+
+def _run_dbt_test(compose_args: list[str]) -> CheckResult:
+    try:
+        result = subprocess.run(
+            compose_args
+            + [
+                "run",
+                "--rm",
+                "--no-deps",
+                "--entrypoint",
+                "/bin/sh",
+                "dbt",
+                "-c",
+                "dbt test --profiles-dir . 2>&1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        passed = result.returncode == 0
+        # Extract summary line from dbt output
+        lines = (result.stdout + result.stderr).splitlines()
+        summary = next(
+            (l.strip() for l in reversed(lines) if "passed" in l.lower() or "failed" in l.lower()),
+            f"exit code {result.returncode}",
+        )
+        return CheckResult(
+            stage=STAGE,
+            name="dbt test",
+            passed=passed,
+            message=summary if passed else f"FAILED — {summary}",
+            detail="\n".join(
+                l for l in lines if "error" in l.lower() or "fail" in l.lower()
+            )[:500]
+            if not passed
+            else None,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(STAGE, "dbt test", False, "timed out (300s)")
+    except Exception as e:
+        return CheckResult(STAGE, "dbt test", False, f"error: {e}")

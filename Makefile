@@ -30,6 +30,23 @@ CATALOG  ?= hadoop
 STORAGE  ?= minio
 MODE     ?= batch
 
+# GNU make reads .env via `include` as a makefile fragment.
+# Lines like "BROKER=redpanda  # comment" leave trailing whitespace in the value.
+# Trailing whitespace breaks ifeq comparisons ("redpanda  " != "redpanda").
+# $(strip ...) removes leading/trailing whitespace from all four axes.
+BROKER   := $(strip $(BROKER))
+CATALOG  := $(strip $(CATALOG))
+STORAGE  := $(strip $(STORAGE))
+MODE     := $(strip $(MODE))
+
+# --- Data directory (host-side, passed to docker compose via environment) ---
+# Absolute path is used so Docker Compose gets an unambiguous bind mount source
+# regardless of which directory docker compose resolves relative paths from.
+# Default: repo-root data/ (one level up from de_template/)
+# Override in .env or shell: HOST_DATA_DIR=/your/absolute/path
+HOST_DATA_DIR ?= $(abspath $(CURDIR)/../data)
+export HOST_DATA_DIR
+
 # --- Compose file assembly based on axes ---
 COMPOSE_FILES := -f infra/base.yml
 
@@ -47,21 +64,50 @@ COMPOSE          = docker compose $(COMPOSE_FILES)
 FLINK_SQL_CLIENT = MSYS_NO_PATHCONV=1 $(COMPOSE) exec -T flink-jobmanager /opt/flink/bin/sql-client.sh embedded
 
 .PHONY: help print-config validate-config \
+        env-select \
         up down clean restart \
-        build-sql \
+        build-sql show-sql \
         create-topics \
         generate generate-limited \
         process process-bronze process-silver process-streaming \
         wait-for-silver \
         dbt-build dbt-test dbt-docs \
-        validate health check-lag \
+        validate validate-py health check-lag \
+        setup-dev test test-unit test-integration \
         benchmark \
+        flink-jobs flink-cancel flink-restart-streaming \
         compact-silver expire-snapshots vacuum maintain \
         logs logs-broker logs-flink logs-flink-tm status ps
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+# =============================================================================
+# Environment Profile Selection
+# =============================================================================
+
+ENV ?= env/local.env
+
+env-select: ## Copy a named env profile to .env: make env-select ENV=env/local.env
+ifndef ENV
+	@uv run python -c "import pathlib; profiles = sorted(pathlib.Path('env').glob('*.env')); print('Usage: make env-select ENV=env/<profile>.env\nAvailable profiles:'); [print(f'  {p.name}') for p in profiles]"
+	@exit 1
+endif
+	@uv run python -c "import shutil; shutil.copy('$(ENV)', '.env'); print('Active config: $(ENV) -> .env')"
+	@$(MAKE) print-config
+
+debug-env: ## Show raw variable values with [brackets] to expose whitespace/path issues
+	@echo "=== de_template: Raw Variable Debug ==="
+	@echo "BROKER        = [$(BROKER)]"
+	@echo "CATALOG       = [$(CATALOG)]"
+	@echo "STORAGE       = [$(STORAGE)]"
+	@echo "MODE          = [$(MODE)]"
+	@echo "COMPOSE_FILES = [$(COMPOSE_FILES)]"
+	@echo "HOST_DATA_DIR = [$(HOST_DATA_DIR)]"
+	@echo "DATA_PATH     = [$(DATA_PATH)]"
+	@echo "TOPIC         = [$(TOPIC)]"
+	@echo "WAREHOUSE     = [$(WAREHOUSE)]"
 
 # =============================================================================
 # Configuration
@@ -93,12 +139,31 @@ ifeq ($(STORAGE),minio)
 		|| (echo "ERROR: MINIO_ROOT_USER not set in .env" && exit 1)
 	@[ -n "$(MINIO_ROOT_PASSWORD)" ] \
 		|| (echo "ERROR: MINIO_ROOT_PASSWORD not set in .env" && exit 1)
+	@[ -n "$(S3_ENDPOINT)" ] \
+		|| (echo "ERROR: STORAGE=minio requires S3_ENDPOINT in .env (e.g. http://minio:9000)" && exit 1)
+	@[ "$(S3_PATH_STYLE)" = "true" ] \
+		|| (echo "WARN: STORAGE=minio should have S3_PATH_STYLE=true in .env")
+endif
+ifeq ($(STORAGE),aws_s3)
+	@echo "$(S3_ENDPOINT)" | grep -qi "minio" \
+		&& echo "WARN: STORAGE=aws_s3 but S3_ENDPOINT contains 'minio' — did you mean STORAGE=minio?" \
+		|| true
 endif
 	@[ -n "$(TOPIC)" ] \
 		|| (echo "ERROR: TOPIC not set in .env" && exit 1)
 	@[ -n "$(WAREHOUSE)" ] \
 		|| (echo "ERROR: WAREHOUSE not set in .env" && exit 1)
-	@echo "Config OK: BROKER=$(BROKER), CATALOG=$(CATALOG), STORAGE=$(STORAGE), MODE=$(MODE)"
+	@# Verify data file exists on the host before starting containers
+	@DATA_FILE="$(HOST_DATA_DIR)/$(notdir $(DATA_PATH))"; \
+	    [ -f "$$DATA_FILE" ] \
+	    || (echo "ERROR: Parquet file not found: $$DATA_FILE" \
+	        && echo "  HOST_DATA_DIR = $(HOST_DATA_DIR)" \
+	        && echo "  DATA_PATH     = $(DATA_PATH)" \
+	        && echo "  Place your parquet file at $$DATA_FILE" \
+	        && echo "  or set HOST_DATA_DIR in .env to its parent directory." \
+	        && exit 1)
+	@echo "Config OK: BROKER=[$(BROKER)] CATALOG=[$(CATALOG)] STORAGE=[$(STORAGE)] MODE=[$(MODE)]"
+	@echo "Data file: $(HOST_DATA_DIR)/$(notdir $(DATA_PATH))"
 
 # =============================================================================
 # Lifecycle
@@ -139,8 +204,8 @@ restart: ## Restart all services
 # SQL Template Rendering
 # =============================================================================
 
-build-sql: ## Render SQL templates → build/sql/ (strict: fails on unresolved ${VAR})
-	@mkdir -p build/sql
+build-sql: ## Render SQL + conf templates → build/sql/ + build/conf/ (strict)
+	@mkdir -p build/sql build/conf
 	@BROKER="$(BROKER)" CATALOG="$(CATALOG)" STORAGE="$(STORAGE)" MODE="$(MODE)" \
 	    TOPIC="$(TOPIC)" DLQ_TOPIC="$(DLQ_TOPIC)" \
 	    WAREHOUSE="$(WAREHOUSE)" S3_ENDPOINT="$(S3_ENDPOINT)" \
@@ -148,7 +213,16 @@ build-sql: ## Render SQL templates → build/sql/ (strict: fails on unresolved $
 	    AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
 	    AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
 	    python3 scripts/render_sql.py
-	@echo "SQL rendered to build/sql/"
+
+show-sql: ## Print rendered SQL files and the active config axes
+	@echo "=== Active config: BROKER=$(BROKER) CATALOG=$(CATALOG) STORAGE=$(STORAGE) MODE=$(MODE) ==="
+	@echo ""
+	@for f in build/sql/*.sql build/conf/*.xml; do \
+	    [ -f "$$f" ] || continue; \
+	    echo "━━━ $$f ━━━"; \
+	    cat "$$f"; \
+	    echo ""; \
+	done
 
 # =============================================================================
 # Topic Management
@@ -214,8 +288,7 @@ process-bronze: ## Submit Bronze layer Flink SQL jobs (batch: Kafka → Iceberg)
 	@echo "=== Bronze: $(BROKER) → Iceberg ==="
 	$(FLINK_SQL_CLIENT) \
 	    -i /opt/flink/sql/00_catalog.sql \
-	    -i /opt/flink/sql/01_source.sql \
-	    -f /opt/flink/sql/05_bronze.sql
+	    -f /opt/flink/sql/05_bronze_batch.sql
 	@echo "Bronze layer complete."
 
 process-silver: ## Submit Silver layer Flink SQL jobs (batch: Bronze → Cleaned Iceberg)
@@ -230,8 +303,7 @@ process-streaming: ## Start continuous streaming Bronze job (runs indefinitely)
 	@echo "NOTE: This job runs indefinitely. Cancel from Flink Dashboard or Ctrl+C."
 	$(FLINK_SQL_CLIENT) \
 	    -i /opt/flink/sql/00_catalog.sql \
-	    -i /opt/flink/sql/01_source.sql \
-	    -f /opt/flink/sql/07_streaming_bronze.sql
+	    -f /opt/flink/sql/07_bronze_streaming.sql
 
 # =============================================================================
 # Wait Gate (replaces sleep 15)
@@ -267,7 +339,7 @@ dbt-docs: ## Generate dbt documentation
 # Validation (4-stage smoke test)
 # =============================================================================
 
-validate: ## Run 4-stage smoke test: health + Flink jobs + row counts + dbt test
+validate: ## Run 4-stage smoke test (bash, no extra deps): health + jobs + rows + dbt
 	@BROKER="$(BROKER)" MODE="$(MODE)" STORAGE="$(STORAGE)" \
 	    CATALOG="$(CATALOG)" DLQ_TOPIC="$(DLQ_TOPIC)" DLQ_MAX="$(DLQ_MAX)" \
 	    WAREHOUSE="$(WAREHOUSE)" \
@@ -278,11 +350,29 @@ validate: ## Run 4-stage smoke test: health + Flink jobs + row counts + dbt test
 	    COMPOSE_FILES="$(COMPOSE_FILES)" \
 	    bash scripts/validate.sh
 
+validate-py: ## Run 4-stage smoke test (Python via uv)
+	uv run python scripts/validate.py
+
+# =============================================================================
+# Developer Setup & Tests  (managed by uv — see pyproject.toml)
+# =============================================================================
+
+setup-dev: ## Create/sync .venv and install all deps (uv required)
+	uv sync
+
+test: test-unit ## Run fast unit tests (alias for test-unit)
+
+test-unit: ## Run unit tests — no Docker required, runs in seconds
+	uv run pytest tests/unit/ -v
+
+test-integration: ## Run full E2E integration tests — requires Docker + active .env
+	uv run pytest tests/integration/ -v -m integration --timeout=600
+
 health: ## Quick health check of all services
 	@echo "=== de_template: Health Check (BROKER=$(BROKER)) ==="
 ifeq ($(BROKER),redpanda)
 	@echo -n "Redpanda:         " && $(COMPOSE) exec -T broker \
-	    rpk cluster health --brokers localhost:9092 2>/dev/null | grep -q "Healthy" \
+	    rpk cluster health 2>/dev/null | grep -qE 'Healthy:.+true' \
 	    && echo "OK" || echo "FAIL"
 	@echo -n "Redpanda Console: " && curl -sf http://localhost:8085 > /dev/null 2>&1 \
 	    && echo "OK" || echo "FAIL"
@@ -348,6 +438,45 @@ benchmark: ## Full benchmark: down → up → topics → generate → process �
 	    > benchmark_results/latest.json && \
 	echo "Results saved to benchmark_results/latest.json" && \
 	$(MAKE) down
+
+# =============================================================================
+# Flink Job Lifecycle (streaming operational control)
+# =============================================================================
+
+flink-jobs: ## List all Flink jobs with state + restart count
+	@echo "=== Flink Jobs ==="
+	@curl -s http://localhost:8081/jobs/overview 2>/dev/null | \
+	    python3 -c "import json,sys; d=json.load(sys.stdin); jobs=d.get('jobs',[]); [print('  (no jobs)') for _ in [1] if not jobs] or [print(f'  {j[\"jid\"][:8]}...  state={j[\"state\"]:<10}  name={j[\"name\"]}') for j in jobs]" \
+	    2>/dev/null || echo "  (Flink not running)"
+
+flink-cancel: ## Cancel a Flink job by ID: make flink-cancel JOB=<job-id>
+ifndef JOB
+	@echo "Usage: make flink-cancel JOB=<job-id>"
+	@echo "Get job IDs with: make flink-jobs"
+	@exit 1
+endif
+	@echo "Cancelling Flink job: $(JOB)"
+	curl -sf -XPATCH "http://localhost:8081/jobs/$(JOB)?mode=cancel" \
+	    && echo "Job $(JOB) cancelled." \
+	    || echo "Cancel failed — check job ID with: make flink-jobs"
+
+flink-restart-streaming: ## Cancel all RUNNING streaming jobs then start fresh Bronze
+	@echo "=== Cancelling all RUNNING Flink jobs ==="
+	@RUNNING=$$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | \
+	    python3 -c "import json,sys; \
+	        d=json.load(sys.stdin); \
+	        print(' '.join(j['jid'] for j in d.get('jobs',[]) if j['state']=='RUNNING'))" \
+	    2>/dev/null || echo ""); \
+	if [ -n "$$RUNNING" ]; then \
+	    for jid in $$RUNNING; do \
+	        echo "  Cancelling $$jid ..."; \
+	        curl -sf -XPATCH "http://localhost:8081/jobs/$$jid?mode=cancel" > /dev/null; \
+	    done; \
+	    sleep 3; \
+	else \
+	    echo "  No RUNNING jobs found."; \
+	fi
+	$(MAKE) process-streaming
 
 # =============================================================================
 # Iceberg Maintenance (run periodically in production)

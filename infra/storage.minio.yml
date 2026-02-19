@@ -5,7 +5,7 @@ services:
   # Only loaded when STORAGE=minio. For cloud storage (aws_s3, gcs, azure),
   # use the corresponding .env.*.example and omit this overlay.
   minio:
-    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: template-minio
     command: server /data --console-address ":9001"
     environment:
@@ -29,7 +29,7 @@ services:
   # MinIO init — create warehouse bucket after MinIO is healthy
   # =============================================================================
   mc-init:
-    image: minio/mc:RELEASE.2024-01-16T16-25-38Z
+    image: minio/mc:RELEASE.2025-05-21T01-59-54Z
     container_name: template-mc-init
     depends_on:
       minio:
