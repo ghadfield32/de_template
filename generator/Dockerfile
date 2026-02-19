@@ -14,5 +14,8 @@ ENV MODE=burst
 ENV DATA_PATH=/data/yellow_tripdata_2024-01.parquet
 ENV MAX_EVENTS=0
 ENV METRICS_PATH=/metrics/latest.json
+# Schema validation (opt-in): set VALIDATE_SCHEMA=true + SCHEMA_PATH to enable
+ENV VALIDATE_SCHEMA=false
+ENV SCHEMA_PATH=/schemas/taxi_trip.json
 
 ENTRYPOINT ["python", "generator.py"]

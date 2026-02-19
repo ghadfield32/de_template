@@ -4,6 +4,7 @@ scripts/health/iceberg.py — Iceberg table row count and metadata checks.
 Runs count_iceberg.py inside the dbt container (which has DuckDB + iceberg
 extension) via docker compose run. Also checks DLQ message count.
 """
+
 from __future__ import annotations
 
 import os
@@ -124,7 +125,9 @@ def _check_table_counts(
                 f"{silver:,} rows (dedup from {bronze:,} bronze)"
                 if valid
                 else (
-                    "empty (0 rows)" if silver == 0 else f"{silver:,} > bronze {bronze:,} (impossible)"
+                    "empty (0 rows)"
+                    if silver == 0
+                    else f"{silver:,} > bronze {bronze:,} (impossible)"
                 ),
             )
         )
@@ -176,7 +179,9 @@ def _check_iceberg_metadata(
                 STAGE,
                 "Iceberg metadata",
                 count > 0,
-                f"{count} snapshot file(s) committed" if count > 0 else "no snapshot metadata found",
+                f"{count} snapshot file(s) committed"
+                if count > 0
+                else "no snapshot metadata found",
             )
         ]
     except Exception as e:
@@ -208,7 +213,7 @@ def _check_dlq(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:
                 text=True,
                 timeout=10,
             )
-            count = len([l for l in result.stdout.splitlines() if l.strip()])
+            count = len([ln for ln in result.stdout.splitlines() if ln.strip()])
         else:
             result = subprocess.run(
                 compose_args
@@ -229,7 +234,7 @@ def _check_dlq(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:
                 text=True,
                 timeout=10,
             )
-            count = len([l for l in result.stdout.splitlines() if l.strip()])
+            count = len([ln for ln in result.stdout.splitlines() if ln.strip()])
 
         passed = count <= cfg.DLQ_MAX
         return [

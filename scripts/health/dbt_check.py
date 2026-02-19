@@ -3,6 +3,7 @@ scripts/health/dbt_check.py — dbt test health check.
 
 Runs `dbt test` inside the dbt container and checks the exit code.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -42,7 +43,11 @@ def _run_dbt_test(compose_args: list[str]) -> CheckResult:
         # Extract summary line from dbt output
         lines = (result.stdout + result.stderr).splitlines()
         summary = next(
-            (l.strip() for l in reversed(lines) if "passed" in l.lower() or "failed" in l.lower()),
+            (
+                ln.strip()
+                for ln in reversed(lines)
+                if "passed" in ln.lower() or "failed" in ln.lower()
+            ),
             f"exit code {result.returncode}",
         )
         return CheckResult(
@@ -50,9 +55,9 @@ def _run_dbt_test(compose_args: list[str]) -> CheckResult:
             name="dbt test",
             passed=passed,
             message=summary if passed else f"FAILED — {summary}",
-            detail="\n".join(
-                l for l in lines if "error" in l.lower() or "fail" in l.lower()
-            )[:500]
+            detail="\n".join(ln for ln in lines if "error" in ln.lower() or "fail" in ln.lower())[
+                :500
+            ]
             if not passed
             else None,
         )

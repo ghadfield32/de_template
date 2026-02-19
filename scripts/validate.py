@@ -19,19 +19,18 @@ Importable (used by integration tests):
     from scripts.validate import run_validation, build_compose_args
     results = run_validation(cfg)
 """
+
 from __future__ import annotations
 
-import json
-import os
-import sys
 import pathlib
+import sys
 
 # Add project root to path so health modules and config are importable
 _ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
 try:
-    from config.settings import load_settings, Settings
+    from config.settings import Settings, load_settings
 except ImportError:
     print(
         "ERROR: pydantic-settings not installed.\n"
@@ -40,12 +39,12 @@ except ImportError:
     )
     sys.exit(1)
 
-from scripts.health import CheckResult
-from scripts.health import broker as health_broker
-from scripts.health import flink as health_flink
-from scripts.health import storage as health_storage
-from scripts.health import iceberg as health_iceberg
-from scripts.health import dbt_check as health_dbt
+from scripts.health import CheckResult  # noqa: E402
+from scripts.health import broker as health_broker  # noqa: E402
+from scripts.health import dbt_check as health_dbt  # noqa: E402
+from scripts.health import flink as health_flink  # noqa: E402
+from scripts.health import iceberg as health_iceberg  # noqa: E402
+from scripts.health import storage as health_storage  # noqa: E402
 
 
 def build_compose_args(cfg: Settings) -> list[str]:
@@ -72,8 +71,10 @@ def _read_events_produced(cfg: Settings, compose_args: list[str]) -> int:
     )
     try:
         import subprocess
+
         result = subprocess.run(
-            compose_args + ["run", "--rm", "--no-deps", "--entrypoint", "python3", "dbt", "-c", script],
+            compose_args
+            + ["run", "--rm", "--no-deps", "--entrypoint", "python3", "dbt", "-c", script],
             capture_output=True,
             text=True,
             timeout=15,

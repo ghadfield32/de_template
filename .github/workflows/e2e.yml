@@ -1,0 +1,123 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"   # Nightly at 02:00 UTC
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv --quiet
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Generate Parquet fixture (100 rows, deterministic)
+        run: uv run python tests/fixtures/make_parquet.py
+
+      - name: Activate local env profile
+        run: |
+          cp env/local.env .env
+          # Point generator at the CI fixture instead of the real dataset
+          sed -i 's|DATA_PATH=.*|DATA_PATH=/data/taxi_fixture.parquet|' .env
+
+      - name: Render SQL templates
+        run: uv run python scripts/render_sql.py
+
+      - name: Start infrastructure
+        env:
+          HOST_DATA_DIR: ${{ github.workspace }}/tests/fixtures
+        run: |
+          # validate-config checks HOST_DATA_DIR/$(basename DATA_PATH) — fixture must exist first
+          docker compose \
+            -f infra/base.yml \
+            -f infra/broker.redpanda.yml \
+            -f infra/storage.minio.yml \
+            up -d
+          echo "Waiting for Flink JobManager to become healthy..."
+          timeout 120 bash -c 'until curl -sf http://localhost:8081/overview; do sleep 5; done'
+
+      - name: Create topics
+        run: |
+          docker compose \
+            -f infra/base.yml \
+            -f infra/broker.redpanda.yml \
+            -f infra/storage.minio.yml \
+            exec -T broker rpk topic create taxi.raw_trips \
+              --brokers localhost:9092 --partitions 3 --replicas 1 || true
+          docker compose \
+            -f infra/base.yml \
+            -f infra/broker.redpanda.yml \
+            -f infra/storage.minio.yml \
+            exec -T broker rpk topic create taxi.raw_trips.dlq \
+              --brokers localhost:9092 --partitions 1 --replicas 1 || true
+
+      - name: Generate events (100 rows from fixture)
+        env:
+          HOST_DATA_DIR: ${{ github.workspace }}/tests/fixtures
+        run: |
+          MSYS_NO_PATHCONV=1 docker compose \
+            -f infra/base.yml \
+            -f infra/broker.redpanda.yml \
+            -f infra/storage.minio.yml \
+            run --rm data-generator
+
+      - name: Process Bronze layer (Kafka → Iceberg)
+        run: |
+          FLINK="docker compose -f infra/base.yml -f infra/broker.redpanda.yml -f infra/storage.minio.yml exec -T flink-jobmanager"
+          $FLINK /opt/flink/bin/sql-client.sh embedded \
+            -i /opt/flink/sql/00_catalog.sql \
+            -f /opt/flink/sql/05_bronze_batch.sql
+
+      - name: Process Silver layer (Bronze → Cleaned Iceberg)
+        run: |
+          FLINK="docker compose -f infra/base.yml -f infra/broker.redpanda.yml -f infra/storage.minio.yml exec -T flink-jobmanager"
+          $FLINK /opt/flink/bin/sql-client.sh embedded \
+            -i /opt/flink/sql/00_catalog.sql \
+            -f /opt/flink/sql/06_silver.sql
+
+      - name: Run dbt build
+        run: |
+          MSYS_NO_PATHCONV=1 docker compose \
+            -f infra/base.yml \
+            -f infra/broker.redpanda.yml \
+            -f infra/storage.minio.yml \
+            run --rm --entrypoint /bin/sh dbt \
+            -c "dbt deps --profiles-dir . && dbt build --full-refresh --profiles-dir ."
+
+      - name: Validate (4-stage smoke test)
+        env:
+          BROKER: redpanda
+          MODE: batch
+          STORAGE: minio
+          CATALOG: hadoop
+          DLQ_TOPIC: taxi.raw_trips.dlq
+          DLQ_MAX: "0"
+          WAREHOUSE: s3a://warehouse/
+          DUCKDB_S3_ENDPOINT: minio:9000
+          DUCKDB_S3_USE_SSL: "false"
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          COMPOSE_FILES: "-f infra/base.yml -f infra/broker.redpanda.yml -f infra/storage.minio.yml"
+        run: bash scripts/validate.sh
+
+      - name: Stop infrastructure
+        if: always()
+        run: |
+          docker compose \
+            -f infra/base.yml \
+            -f infra/broker.redpanda.yml \
+            -f infra/storage.minio.yml \
+            --profile generator --profile dbt \
+            down -v

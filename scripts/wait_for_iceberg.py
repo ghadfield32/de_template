@@ -7,6 +7,7 @@ Polls silver.cleaned_trips via iceberg_scan() until rows > 0 or 90s timeout.
 
 Replaces the brittle 'sleep 15' pattern. Called by: make wait-for-silver
 """
+
 import os
 import sys
 import time

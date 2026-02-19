@@ -4,6 +4,7 @@ scripts/health/flink.py — Flink JobManager health and job state checks.
 Uses the Flink REST API (localhost:8081) — no docker exec needed since
 the port is published to the host.
 """
+
 from __future__ import annotations
 
 import json
@@ -79,9 +80,7 @@ def _check_job_state(mode: str) -> list[CheckResult]:
             jid = job.get("jid", "?")
             short_id = jid[:8]
             try:
-                with urllib.request.urlopen(
-                    f"{FLINK_URL}/jobs/{jid}", timeout=5
-                ) as resp:
+                with urllib.request.urlopen(f"{FLINK_URL}/jobs/{jid}", timeout=5) as resp:
                     detail = json.loads(resp.read())
                 restarts = detail.get("numRestarts", 0)
                 results.append(
@@ -89,9 +88,7 @@ def _check_job_state(mode: str) -> list[CheckResult]:
                         STAGE_JOBS,
                         f"Job {short_id}... stability",
                         restarts == 0,
-                        f"{restarts} restart(s)"
-                        if restarts > 0
-                        else "0 restarts (stable)",
+                        f"{restarts} restart(s)" if restarts > 0 else "0 restarts (stable)",
                     )
                 )
             except Exception:

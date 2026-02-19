@@ -14,11 +14,12 @@ Two usage modes:
       cfg = Settings(BROKER="kafka", STORAGE="minio", ...)
       # All values come exclusively from kwargs → clean, reproducible.
 """
+
 from __future__ import annotations
 
 import os
 import re
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import (
@@ -73,29 +74,29 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     DATA_PATH: str = "/data/yellow_tripdata_2024-01.parquet"
     MAX_EVENTS: int = 0
-    HOST_DATA_DIR: Optional[str] = None
+    HOST_DATA_DIR: str | None = None
 
     # -------------------------------------------------------------------------
     # Warehouse (Flink S3A + Iceberg)
     # -------------------------------------------------------------------------
     WAREHOUSE: str = "s3a://warehouse/"
-    S3_ENDPOINT: Optional[str] = None
+    S3_ENDPOINT: str | None = None
     S3_USE_SSL: bool = False
     S3_PATH_STYLE: bool = True
 
     # -------------------------------------------------------------------------
     # DuckDB httpfs  (NO http:// prefix — DuckDB httpfs format requirement)
     # -------------------------------------------------------------------------
-    DUCKDB_S3_ENDPOINT: Optional[str] = None
+    DUCKDB_S3_ENDPOINT: str | None = None
     DUCKDB_S3_USE_SSL: bool = False
 
     # -------------------------------------------------------------------------
     # Credentials
     # -------------------------------------------------------------------------
-    MINIO_ROOT_USER: Optional[str] = None
-    MINIO_ROOT_PASSWORD: Optional[str] = None
-    AWS_ACCESS_KEY_ID: Optional[str] = None
-    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    MINIO_ROOT_USER: str | None = None
+    MINIO_ROOT_PASSWORD: str | None = None
+    AWS_ACCESS_KEY_ID: str | None = None
+    AWS_SECRET_ACCESS_KEY: str | None = None
     AWS_REGION: str = "us-east-1"
 
     # -------------------------------------------------------------------------

@@ -3,6 +3,7 @@ scripts/health/broker.py — Broker (Redpanda / Kafka) health checks.
 
 Calls docker compose exec to run broker-native CLI health commands.
 """
+
 from __future__ import annotations
 
 import subprocess

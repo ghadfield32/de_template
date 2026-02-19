@@ -11,6 +11,7 @@ Output (stdout):
 
 Exit code: 0 always (errors produce -1 counts so the caller can detect them).
 """
+
 import os
 
 import duckdb

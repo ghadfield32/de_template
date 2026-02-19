@@ -12,6 +12,7 @@ Fails fast if any ${VAR} placeholder remains unsubstituted after rendering.
 Usage (called by Makefile build-sql target):
     python3 scripts/render_sql.py
 """
+
 import os
 import pathlib
 import re
@@ -32,7 +33,7 @@ def load_env(path=".env") -> dict:
                 k = k.strip()
                 v = v.strip()
                 # Strip inline comments: anything after whitespace+# is a comment
-                v = re.sub(r'\s+#.*$', '', v)
+                v = re.sub(r"\s+#.*$", "", v)
                 if k:
                     env[k] = v
     except FileNotFoundError:
@@ -83,10 +84,7 @@ def main():
     sql_out_dir.mkdir(parents=True, exist_ok=True)
     conf_out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(
-        f"\nRendering templates "
-        f"(CATALOG={catalog}, MODE={mode}, STORAGE={storage})..."
-    )
+    print(f"\nRendering templates (CATALOG={catalog}, MODE={mode}, STORAGE={storage})...")
 
     # -----------------------------------------------------------------------
     # SQL templates → build/sql/
@@ -114,8 +112,8 @@ def main():
     #   06_silver.sql.tmpl        → Silver dedup + clean (batch)
     #   07_bronze_streaming.sql.tmpl → streaming Bronze (runs indefinitely)
     for tmpl_name, out_name in [
-        ("05_bronze_batch.sql.tmpl",     "05_bronze_batch.sql"),
-        ("06_silver.sql.tmpl",           "06_silver.sql"),
+        ("05_bronze_batch.sql.tmpl", "05_bronze_batch.sql"),
+        ("06_silver.sql.tmpl", "06_silver.sql"),
         ("07_bronze_streaming.sql.tmpl", "07_bronze_streaming.sql"),
     ]:
         tmpl_path = sql_tmpl_dir / tmpl_name

@@ -1,0 +1,198 @@
+# =============================================================================
+# datasets/taxi/dataset.yml — NYC Yellow Taxi reference dataset
+# =============================================================================
+# This is the canonical manifest for the taxi reference pipeline.
+# Run: make scaffold DATASET=taxi   (re-generates SQL templates + dbt staging)
+#
+# Copy this file to datasets/<your_dataset>/dataset.yml and edit to adapt
+# the pipeline for your own data. Then run: make scaffold DATASET=<your_dataset>
+# =============================================================================
+
+name: taxi
+description: "NYC Yellow Taxi trips (TLC open data)"
+
+# Topic names — kept as ${TOPIC} / ${DLQ_TOPIC} placeholders so render_sql.py
+# substitutes the actual values from .env at build time.
+topic: "${TOPIC}"
+dlq_topic: "${DLQ_TOPIC}"
+
+# Iceberg table names (fully-qualified: <catalog_db>.<table>)
+bronze_table: bronze.raw_trips
+silver_table: silver.cleaned_trips
+
+# Event timestamp column (used for watermarking in Bronze DDL)
+# Must match the column name in the Kafka source (original Parquet case).
+event_ts_col: tpep_pickup_datetime
+ts_format: "yyyy-MM-dd''T''HH:mm:ss"   # Python datetime.isoformat() T-separated format
+
+# Silver partition column — always an explicit DATE column (Flink rejects transform expressions)
+partition_date_col: pickup_date
+partition_date_expr: "CAST(tpep_pickup_datetime AS DATE)"
+
+# Column definitions
+# Each column needs:
+#   name:         original Parquet / Kafka JSON key (case-sensitive)
+#   kafka_type:   Flink SQL type for the Kafka source table
+#   bronze_type:  Flink SQL type stored in Bronze Iceberg (often TIMESTAMP(3) for parsed ts)
+#   silver_name:  snake_case rename in Silver (omit if same as name)
+#   silver_type:  Flink SQL type in Silver (more specific casts, DECIMAL for money)
+#   is_event_ts:  true for the column used as event_time watermark source (max 1)
+#   comment:      optional inline comment in generated SQL
+columns:
+  - name: VendorID
+    kafka_type: BIGINT
+    bronze_type: BIGINT
+    silver_name: vendor_id
+    silver_type: INT
+    comment: "JSON key: VendorID"
+
+  - name: tpep_pickup_datetime
+    kafka_type: STRING
+    bronze_type: "TIMESTAMP(3)"
+    silver_name: pickup_datetime
+    silver_type: "TIMESTAMP(3)"
+    is_event_ts: true
+    comment: "raw ISO timestamp: 2024-01-01T00:32:47"
+
+  - name: tpep_dropoff_datetime
+    kafka_type: STRING
+    bronze_type: "TIMESTAMP(3)"
+    silver_name: dropoff_datetime
+    silver_type: "TIMESTAMP(3)"
+    comment: "raw ISO timestamp"
+
+  - name: passenger_count
+    kafka_type: BIGINT
+    bronze_type: BIGINT
+    silver_name: passenger_count
+    silver_type: INT
+
+  - name: trip_distance
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: trip_distance_miles
+    silver_type: DOUBLE
+
+  - name: RatecodeID
+    kafka_type: BIGINT
+    bronze_type: BIGINT
+    silver_name: rate_code_id
+    silver_type: INT
+    comment: "JSON key: RatecodeID"
+
+  - name: store_and_fwd_flag
+    kafka_type: STRING
+    bronze_type: STRING
+    silver_name: store_and_fwd_flag
+    silver_type: STRING
+
+  - name: PULocationID
+    kafka_type: BIGINT
+    bronze_type: BIGINT
+    silver_name: pickup_location_id
+    silver_type: INT
+    comment: "JSON key: PULocationID"
+
+  - name: DOLocationID
+    kafka_type: BIGINT
+    bronze_type: BIGINT
+    silver_name: dropoff_location_id
+    silver_type: INT
+    comment: "JSON key: DOLocationID"
+
+  - name: payment_type
+    kafka_type: BIGINT
+    bronze_type: BIGINT
+    silver_name: payment_type_id
+    silver_type: INT
+
+  - name: fare_amount
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: fare_amount
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: extra
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: extra_amount
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: mta_tax
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: mta_tax
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: tip_amount
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: tip_amount
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: tolls_amount
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: tolls_amount
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: improvement_surcharge
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: improvement_surcharge
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: total_amount
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: total_amount
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: congestion_surcharge
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: congestion_surcharge
+    silver_type: "DECIMAL(10, 2)"
+
+  - name: Airport_fee
+    kafka_type: DOUBLE
+    bronze_type: DOUBLE
+    silver_name: airport_fee
+    silver_type: "DECIMAL(10, 2)"
+    comment: "JSON key: Airport_fee (note capital A)"
+
+# Natural key for ROW_NUMBER() deduplication in Silver.
+# Use a stable natural event ID if available. If not, use the minimal
+# combination that uniquely identifies one real-world event.
+# Rule: avoid mutable fields (status, updated_at) and ingestion_ts.
+dedup_key:
+  - VendorID
+  - tpep_pickup_datetime
+  - tpep_dropoff_datetime
+  - PULocationID
+  - DOLocationID
+  - fare_amount
+  - total_amount
+
+# Fields used to build the MD5 surrogate key (trip_id).
+# Should match dedup_key fields for stability across replays.
+surrogate_key_fields:
+  - VendorID
+  - tpep_pickup_datetime
+  - tpep_dropoff_datetime
+  - PULocationID
+  - DOLocationID
+  - fare_amount
+  - total_amount
+
+# Data quality filters applied in Silver (WHERE clause conditions).
+# Bronze is append-only — never filter in Bronze.
+quality_filters:
+  - "tpep_pickup_datetime IS NOT NULL"
+  - "tpep_dropoff_datetime IS NOT NULL"
+  - "total_amount > 0"
+  - "trip_distance >= 0"
+  - "passenger_count >= 0"
+  # Date range: adjust to match your actual data. Remove for open-ended streaming.
+  - "CAST(tpep_pickup_datetime AS DATE) >= DATE '2024-01-01'"
+  - "CAST(tpep_pickup_datetime AS DATE) <  DATE '2024-02-01'"

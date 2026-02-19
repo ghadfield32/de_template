@@ -7,6 +7,7 @@ beyond a tmp_path fixture.
 Run: make test-unit
      pytest tests/unit/test_render_sql.py -v
 """
+
 import pathlib
 
 import pytest
@@ -14,10 +15,10 @@ import pytest
 # conftest.py adds project root to sys.path
 from scripts.render_sql import load_env, render_template
 
-
 # ---------------------------------------------------------------------------
 # load_env
 # ---------------------------------------------------------------------------
+
 
 class TestLoadEnv:
     def test_loads_key_value_pairs(self, tmp_path):
@@ -61,6 +62,7 @@ class TestLoadEnv:
 # ---------------------------------------------------------------------------
 # render_template
 # ---------------------------------------------------------------------------
+
 
 class TestRenderTemplate:
     def test_substitutes_all_vars(self, tmp_path):
@@ -150,6 +152,7 @@ class TestRenderTemplate:
 # ---------------------------------------------------------------------------
 # Integration: render actual project templates (if they exist)
 # ---------------------------------------------------------------------------
+
 
 class TestRealTemplates:
     """Smoke-render the actual SQL templates with a minimal env dict."""

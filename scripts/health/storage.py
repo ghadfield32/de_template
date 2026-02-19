@@ -4,6 +4,7 @@ scripts/health/storage.py — Object storage health checks.
 For MinIO: uses the health live endpoint (localhost:9000).
 For cloud storage: skipped (auth is environment-level, not a live check here).
 """
+
 from __future__ import annotations
 
 import urllib.error

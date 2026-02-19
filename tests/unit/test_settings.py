@@ -7,15 +7,16 @@ dependencies. They run in under 1 second.
 Run: make test-unit
      pytest tests/unit/test_settings.py -v
 """
+
 import pytest
 
 # conftest.py adds project root to sys.path
 from config.settings import Settings
 
-
 # ---------------------------------------------------------------------------
 # Helpers: minimal valid kwargs for each STORAGE type
 # ---------------------------------------------------------------------------
+
 
 def _minio_kwargs(**overrides):
     base = dict(
@@ -49,6 +50,7 @@ def _aws_kwargs(**overrides):
 # ---------------------------------------------------------------------------
 # Axis validation
 # ---------------------------------------------------------------------------
+
 
 class TestAxisValidation:
     def test_valid_default_minio(self):
@@ -97,6 +99,7 @@ class TestAxisValidation:
 # Storage combination validation
 # ---------------------------------------------------------------------------
 
+
 class TestStorageCombos:
     def test_minio_requires_s3_endpoint(self):
         kwargs = _minio_kwargs()
@@ -143,6 +146,7 @@ class TestStorageCombos:
 # Convenience properties
 # ---------------------------------------------------------------------------
 
+
 class TestConvenienceProperties:
     def test_warehouse_s3_path_converts_s3a_to_s3(self):
         s = Settings(**_minio_kwargs(WAREHOUSE="s3a://warehouse/"))
@@ -168,6 +172,7 @@ class TestConvenienceProperties:
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
+
 
 class TestDefaults:
     def test_dlq_max_defaults_to_zero(self):

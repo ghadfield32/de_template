@@ -15,28 +15,31 @@ Each test class represents a phase of the pipeline. They are designed to
 run in order (use pytest -p no:randomly to preserve order, or run them
 as a single session via make test-integration).
 """
+
 from __future__ import annotations
 
-import json
 import pathlib
-import subprocess
 import shutil
+import subprocess
 import time
 
 import pytest
 
 # conftest.py adds project root to sys.path
 from config.settings import load_settings
-from scripts.validate import build_compose_args, run_validation
+from scripts.validate import run_validation
 
 pytestmark = pytest.mark.integration
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 
 
-def _make(*targets: str, extra_env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def _make(
+    *targets: str, extra_env: dict | None = None, check: bool = True
+) -> subprocess.CompletedProcess:
     """Run one or more make targets from the project root."""
     import os
+
     env = {**os.environ, **(extra_env or {})}
     result = subprocess.run(
         ["make"] + list(targets),
@@ -93,11 +96,12 @@ def ensure_env():
 # Phase 1: env-select
 # ---------------------------------------------------------------------------
 
+
 class TestEnvSelect:
     @needs_docker
     def test_env_select_copies_local_env(self, tmp_path):
         """env-select correctly copies env profile to .env."""
-        result = _make("env-select", extra_env={"ENV": "env/local.env"})
+        _make("env-select", extra_env={"ENV": "env/local.env"})
         assert (PROJECT_ROOT / ".env").exists()
         cfg = load_settings(env_file=str(PROJECT_ROOT / ".env"))
         assert cfg.BROKER in ("redpanda", "kafka")
@@ -107,6 +111,7 @@ class TestEnvSelect:
 # ---------------------------------------------------------------------------
 # Phase 2: Config validation
 # ---------------------------------------------------------------------------
+
 
 class TestConfigValidation:
     def test_settings_load_from_env(self):
@@ -125,6 +130,7 @@ class TestConfigValidation:
 # ---------------------------------------------------------------------------
 # Phase 3: SQL rendering
 # ---------------------------------------------------------------------------
+
 
 class TestSqlRendering:
     def test_build_sql_renders_without_errors(self):
@@ -149,6 +155,7 @@ class TestSqlRendering:
 # ---------------------------------------------------------------------------
 # Phase 4: Full pipeline (slow — requires Docker)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.slow
 class TestFullPipeline:
@@ -180,8 +187,6 @@ class TestFullPipeline:
     def test_data_generation(self):
         """make generate-limited produces events to the broker."""
         _make("generate-limited")
-        # Metrics file should be written
-        metrics_path = PROJECT_ROOT / "build" / "metrics" / "latest.json"
         # Metrics live on a volume; verify via dbt container is done in validate
         # Just check the make target succeeded
 
@@ -212,9 +217,7 @@ class TestFullPipeline:
         failures = [r for r in results if not r.passed]
         if failures:
             failure_summary = "\n".join(str(r) for r in failures)
-            pytest.fail(
-                f"{len(failures)} health check(s) failed:\n{failure_summary}"
-            )
+            pytest.fail(f"{len(failures)} health check(s) failed:\n{failure_summary}")
 
     @needs_docker
     def test_stack_teardown(self):

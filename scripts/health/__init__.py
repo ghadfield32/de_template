@@ -8,8 +8,8 @@ Usage:
     from scripts.health import CheckResult
     from scripts.health.flink import run_checks as flink_checks
 """
-from dataclasses import dataclass, field
-from typing import Optional
+
+from dataclasses import dataclass
 
 
 @dataclass
@@ -18,7 +18,7 @@ class CheckResult:
     name: str
     passed: bool
     message: str
-    detail: Optional[str] = None
+    detail: str | None = None
 
     def __str__(self) -> str:
         status = "PASS" if self.passed else "FAIL"

@@ -24,6 +24,11 @@ ifneq (,$(wildcard .env))
     export
 endif
 
+# --- Project name — prevents container/network collisions between parallel stacks ---
+# Two checkouts can coexist: COMPOSE_PROJECT_NAME=de_v2 make up
+COMPOSE_PROJECT_NAME ?= de_template
+export COMPOSE_PROJECT_NAME
+
 # --- Axis defaults (overridable from shell: make up BROKER=kafka) ---
 BROKER   ?= redpanda
 CATALOG  ?= hadoop
@@ -74,6 +79,9 @@ FLINK_SQL_CLIENT = MSYS_NO_PATHCONV=1 $(COMPOSE) exec -T flink-jobmanager /opt/f
         dbt-build dbt-test dbt-docs \
         validate validate-py health check-lag \
         setup-dev test test-unit test-integration \
+        fmt lint type ci \
+        scaffold \
+        obs-up obs-down \
         benchmark \
         flink-jobs flink-cancel flink-restart-streaming \
         compact-silver expire-snapshots vacuum maintain \
@@ -368,6 +376,33 @@ test-unit: ## Run unit tests — no Docker required, runs in seconds
 test-integration: ## Run full E2E integration tests — requires Docker + active .env
 	uv run pytest tests/integration/ -v -m integration --timeout=600
 
+# =============================================================================
+# Code Quality  (ruff + pyright — see pyproject.toml for config)
+# =============================================================================
+
+fmt: ## Auto-format all Python files with ruff
+	uv run ruff format .
+
+lint: ## Lint all Python files with ruff (auto-fix safe violations)
+	uv run ruff check . --fix
+
+type: ## Type-check all Python files with pyright
+	uv run pyright
+
+ci: lint type test-unit ## Fast local pre-push check: lint + type + unit tests
+
+# =============================================================================
+# Dataset Scaffold
+# =============================================================================
+
+scaffold: ## Generate SQL templates + dbt staging from a dataset manifest: make scaffold DATASET=taxi
+ifndef DATASET
+	@uv run python -c "import pathlib; datasets=[p.name for p in sorted(pathlib.Path('datasets').iterdir()) if p.is_dir() and not p.name.startswith('_')]; print('Usage: make scaffold DATASET=<name>\nAvailable datasets:\n' + '\n'.join('  ' + d for d in datasets))"
+	@exit 1
+endif
+	uv run python scripts/scaffold_dataset.py $(DATASET)
+	@echo "Next: make build-sql"
+
 health: ## Quick health check of all services
 	@echo "=== de_template: Health Check (BROKER=$(BROKER)) ==="
 ifeq ($(BROKER),redpanda)
@@ -499,6 +534,14 @@ maintain: compact-silver expire-snapshots ## Run all routine Iceberg maintenance
 # =============================================================================
 # Observability
 # =============================================================================
+
+obs-up: ## Start Prometheus + Grafana observability overlay (--profile obs)
+	$(COMPOSE) -f infra/observability.optional.yml --profile obs up -d
+	@echo "Grafana:    http://localhost:3000  (admin/admin)"
+	@echo "Prometheus: http://localhost:9090"
+
+obs-down: ## Stop Prometheus + Grafana
+	$(COMPOSE) -f infra/observability.optional.yml --profile obs down
 
 logs: ## Tail logs from all services
 	$(COMPOSE) logs -f --tail=100

@@ -7,6 +7,10 @@
 
 FROM flink:2.0.1-java17
 
+# Install curl for Docker healthcheck (not in the Flink base image by default)
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Connector versions (Flink 2.0 requires new connector builds)
 ARG FLINK_KAFKA_CONNECTOR_VERSION=4.0.1-2.0
 ARG ICEBERG_VERSION=1.10.1

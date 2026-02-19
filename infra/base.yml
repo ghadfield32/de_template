@@ -14,8 +14,10 @@ services:
       - "9249:9249"   # Prometheus metrics endpoint
     environment:
       HADOOP_CONF_DIR: /opt/hadoop/conf
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      # No :-minioadmin defaults — local.env sets them explicitly; cloud profiles
+      # leave them unset so DefaultAWSCredentialsProviderChain picks up IAM roles.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
     volumes:
       - ../build/sql:/opt/flink/sql:ro
@@ -44,8 +46,8 @@ services:
     command: taskmanager
     environment:
       HADOOP_CONF_DIR: /opt/hadoop/conf
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: ${AWS_REGION:-us-east-1}
     volumes:
       - ../build/sql:/opt/flink/sql:ro
@@ -76,8 +78,8 @@ services:
       - ../scripts:/scripts
       - metrics-vol:/metrics:ro
     environment:
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       DUCKDB_S3_ENDPOINT: ${DUCKDB_S3_ENDPOINT:-minio:9000}
       DUCKDB_S3_USE_SSL: ${DUCKDB_S3_USE_SSL:-false}
       WAREHOUSE: ${WAREHOUSE:-s3a://warehouse/}
@@ -100,9 +102,13 @@ services:
       DATA_PATH: ${DATA_PATH:-/data/yellow_tripdata_2024-01.parquet}
       MAX_EVENTS: ${MAX_EVENTS:-0}
       METRICS_PATH: /metrics/latest.json
+      # Schema validation (opt-in — set VALIDATE_SCHEMA=true in .env to enable)
+      VALIDATE_SCHEMA: ${VALIDATE_SCHEMA:-false}
+      SCHEMA_PATH: ${SCHEMA_PATH:-/schemas/taxi_trip.json}
     volumes:
       - ${HOST_DATA_DIR}:/data:ro   # absolute path set by Makefile (repo-root data/)
       - metrics-vol:/metrics
+      - ../schemas:/schemas:ro
     profiles:
       - generator
     networks:

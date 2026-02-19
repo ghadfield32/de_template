@@ -6,6 +6,7 @@ Adds the project root to sys.path so unit tests can import:
     from scripts.render_sql import render_template, load_env
     from scripts.health import CheckResult
 """
+
 import pathlib
 import sys
 
