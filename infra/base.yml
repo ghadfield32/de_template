@@ -66,12 +66,10 @@ services:
   # =============================================================================
   dbt:
     build:
-      context: ../docker
-      dockerfile: dbt.Dockerfile
-      args:
-        DBT_ADAPTER: dbt-duckdb
-        DBT_ADAPTER_VERSION: ">=1.8.0,<2.0.0"
+      context: ..
+      dockerfile: docker/tooling.Dockerfile
     container_name: template-dbt
+    entrypoint: ["dbt"]
     working_dir: /dbt
     volumes:
       - ../dbt:/dbt
@@ -101,8 +99,10 @@ services:
   # =============================================================================
   data-generator:
     build:
-      context: ../generator
+      context: ..
+      dockerfile: docker/tooling.Dockerfile
     container_name: template-generator
+    entrypoint: ["python", "/app/generator.py"]
     environment:
       BROKER_URL: broker:9092
       TOPIC: ${TOPIC}

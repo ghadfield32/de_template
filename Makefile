@@ -99,7 +99,8 @@ HOST_DATA_DIR ?= $(abspath $(CURDIR)/../data)
 export HOST_DATA_DIR
 
 # --- Compose file assembly based on axes ---
-COMPOSE_FILES := -f infra/base.yml
+# Observability (Prometheus + Grafana) is always included — starts with `make up`
+COMPOSE_FILES := -f infra/base.yml -f infra/observability.yml
 
 ifeq ($(BROKER),redpanda)
     COMPOSE_FILES += -f infra/broker.redpanda.yml
@@ -110,6 +111,9 @@ endif
 ifeq ($(STORAGE),minio)
     COMPOSE_FILES += -f infra/storage.minio.yml
 endif
+
+# Orchestration overlay (Airflow) — included unconditionally so `down` can stop it
+COMPOSE_FILES += -f infra/orchestration.airflow.yml
 
 COMPOSE          = docker compose $(COMPOSE_FILES)
 FLINK_SQL_CLIENT = MSYS_NO_PATHCONV=1 $(COMPOSE) exec -T flink-jobmanager /opt/flink/bin/sql-client.sh embedded
@@ -125,10 +129,12 @@ FLINK_SQL_CLIENT = MSYS_NO_PATHCONV=1 $(COMPOSE) exec -T flink-jobmanager /opt/f
         wait-for-silver \
         dbt-build dbt-test dbt-docs \
         validate validate-py health check-lag \
-        setup-dev test test-unit test-integration \
+        setup-dev venv-reset test test-unit test-integration \
         fmt lint type ci \
         scaffold scaffold-validate \
         obs-up obs-down \
+        console-up console-down \
+        orch-up orch-down \
         benchmark \
         flink-jobs flink-cancel flink-restart-streaming \
         compact-silver expire-snapshots vacuum maintain \
@@ -279,17 +285,20 @@ doctor: ## Run local diagnostics (settings, manifests, template render, docker, 
 # Lifecycle
 # =============================================================================
 
-up: validate-config build-sql ## Start all infrastructure services
+up: validate-config build-sql ## Start all infrastructure services (incl. Prometheus + Grafana)
 	$(COMPOSE) up -d
 	@echo ""
-	@echo "=== de_template: $(BROKER) + Flink + Iceberg ==="
+	@echo "=== de_template: $(BROKER) + Flink + Iceberg + Observability ==="
 	@echo "Flink Dashboard:    http://localhost:8081"
+	@echo "Grafana:            http://localhost:3000  (admin/admin)"
+	@echo "Prometheus:         http://localhost:9090"
 ifeq ($(STORAGE),minio)
 	@echo "MinIO Console:      http://localhost:9001  ($(MINIO_ROOT_USER)/$(MINIO_ROOT_PASSWORD))"
 endif
-ifeq ($(BROKER),redpanda)
-	@echo "Redpanda Console:   http://localhost:8085"
-endif
+	@echo ""
+	@echo "Optional add-ons:"
+	@echo "  make console-up   → Broker topic UI on http://localhost:8085"
+	@echo "  make orch-up      → Airflow UI on http://localhost:8080  (admin/admin)"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  make create-topics    → Create Kafka topics"
@@ -298,11 +307,13 @@ endif
 	@echo "  make validate         → Run 4-stage smoke test"
 
 down: ## Stop all services and remove volumes
-	$(COMPOSE) --profile generator --profile dbt --profile catalog-rest down -v
+	$(COMPOSE) --profile generator --profile dbt --profile catalog-rest \
+	    --profile console --profile orchestration down -v
 	@echo "Pipeline stopped and volumes removed."
 
 clean: ## Stop everything and prune all related resources
-	$(COMPOSE) --profile generator --profile dbt --profile catalog-rest down -v --remove-orphans
+	$(COMPOSE) --profile generator --profile dbt --profile catalog-rest \
+	    --profile console --profile orchestration down -v --remove-orphans
 	rm -rf build/
 	@echo "Pipeline fully cleaned."
 
@@ -481,6 +492,13 @@ validate-py: ## Run 4-stage smoke test (Python via uv)
 setup-dev: ## Create/sync .venv and install all deps (uv required)
 	uv sync
 
+venv-reset: ## Delete and recreate .venv (fixes WSL/Windows cross-platform venv contamination)
+	@echo "Removing .venv..."
+	rm -rf .venv
+	@echo "Recreating .venv for this platform..."
+	uv sync
+	@echo "Done. Run: cat .venv/pyvenv.cfg  to verify 'home' points to the correct platform."
+
 test: test-unit ## Run fast unit tests (alias for test-unit)
 
 test-unit: ## Run unit tests — no Docker required, runs in seconds
@@ -530,14 +548,16 @@ ifeq ($(BROKER),redpanda)
 	@echo -n "Redpanda:         " && $(COMPOSE) exec -T broker \
 	    rpk cluster health 2>/dev/null | grep -qE 'Healthy:.+true' \
 	    && echo "OK" || echo "FAIL"
-	@echo -n "Redpanda Console: " && curl -sf http://localhost:8085 > /dev/null 2>&1 \
-	    && echo "OK" || echo "FAIL"
 else
 	@echo -n "Kafka:            " && $(COMPOSE) exec -T broker \
 	    /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092 \
 	    > /dev/null 2>&1 && echo "OK" || echo "FAIL"
 endif
 	@echo -n "Flink Dashboard:  " && curl -sf http://localhost:8081/overview > /dev/null 2>&1 \
+	    && echo "OK" || echo "FAIL"
+	@echo -n "Prometheus:       " && curl -sf http://localhost:9090/-/healthy > /dev/null 2>&1 \
+	    && echo "OK" || echo "FAIL"
+	@echo -n "Grafana:          " && curl -sf http://localhost:3000/api/health > /dev/null 2>&1 \
 	    && echo "OK" || echo "FAIL"
 ifeq ($(STORAGE),minio)
 	@echo -n "MinIO:            " && curl -sf http://localhost:9000/minio/health/live \
@@ -651,16 +671,45 @@ vacuum: ## Remove orphan Iceberg files (run weekly)
 maintain: compact-silver expire-snapshots ## Run all routine Iceberg maintenance
 
 # =============================================================================
-# Observability
+# Observability (Prometheus + Grafana start automatically with `make up`)
 # =============================================================================
 
-obs-up: ## Start Prometheus + Grafana observability overlay (--profile obs)
-	$(COMPOSE) -f infra/observability.optional.yml --profile obs up -d
+obs-up: ## Restart Prometheus + Grafana (already included in `make up`)
+	$(COMPOSE) up -d prometheus grafana
 	@echo "Grafana:    http://localhost:3000  (admin/admin)"
 	@echo "Prometheus: http://localhost:9090"
 
 obs-down: ## Stop Prometheus + Grafana
-	$(COMPOSE) -f infra/observability.optional.yml --profile obs down
+	$(COMPOSE) stop prometheus grafana
+
+# =============================================================================
+# Broker Console (topic UI — opt-in, port 8085)
+# =============================================================================
+
+console-up: ## Start broker topic UI (--profile console): make console-up
+	$(COMPOSE) --profile console up -d
+	@echo "Broker console: http://localhost:8085"
+
+console-down: ## Stop broker topic UI
+	$(COMPOSE) --profile console down
+
+# =============================================================================
+# Orchestration (Airflow CeleryExecutor — opt-in, port 8080)
+# =============================================================================
+
+orch-up: ## Start Airflow orchestration stack (--profile orchestration)
+	$(COMPOSE) --profile orchestration up -d airflow-postgres airflow-redis
+	@echo "Waiting for Airflow DB to be ready..."
+	@sleep 10
+	$(COMPOSE) --profile orchestration run --rm airflow-init
+	$(COMPOSE) --profile orchestration up -d airflow-webserver airflow-scheduler airflow-worker
+	@echo ""
+	@echo "Airflow UI: http://localhost:8080  (admin/admin)"
+	@echo "Trigger the de_pipeline DAG from the UI or via:"
+	@echo "  docker exec template-airflow-scheduler airflow dags trigger de_pipeline"
+
+orch-down: ## Stop Airflow orchestration stack
+	$(COMPOSE) --profile orchestration down
 
 logs: ## Tail logs from all services
 	$(COMPOSE) logs -f --tail=100

@@ -38,7 +38,7 @@ services:
       - pipeline-net
 
   # =============================================================================
-  # Redpanda Console (web UI for topic inspection)
+  # Redpanda Console (web UI for topic inspection — start with: make console-up)
   # =============================================================================
   redpanda-console:
     image: docker.redpanda.com/redpandadata/console:v3.2.2
@@ -58,5 +58,7 @@ services:
     depends_on:
       broker:
         condition: service_healthy
+    profiles:
+      - console
     networks:
       - pipeline-net

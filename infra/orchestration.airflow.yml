@@ -1,0 +1,194 @@
+# =============================================================================
+# de_template: Airflow CeleryExecutor orchestration overlay
+# =============================================================================
+# Start with: make orch-up
+# Stop  with: make orch-down
+#
+# Services (all under --profile orchestration):
+#   airflow-postgres   — Airflow metadata DB
+#   airflow-redis      — Celery message broker
+#   airflow-init       — One-shot DB migration + admin user creation
+#   airflow-webserver  — Airflow UI on http://localhost:8080  (admin/admin)
+#   airflow-scheduler  — DAG scheduling engine
+#   airflow-worker     — Celery task execution
+#
+# Docker socket is mounted on scheduler + worker so DAG operators can
+# exec into running pipeline containers (Flink, broker) and launch
+# ephemeral tooling containers (generator, dbt, validate).
+# =============================================================================
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: docker/airflow.Dockerfile
+  image: de_template-airflow:latest
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@airflow-redis:6379/0
+    # Change these secrets in production — use Airflow Secrets Backend or env injection
+    AIRFLOW__CORE__FERNET_KEY: de-template-local-fernet-key-change-in-prod=
+    AIRFLOW__WEBSERVER__SECRET_KEY: de-template-webserver-secret-change-in-prod
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__LOGGING__LOG_LEVEL: WARNING
+    # Pass pipeline config through to DAG operators
+    COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-de_template}
+    BROKER: ${BROKER:-redpanda}
+    TOPIC: ${TOPIC:-}
+    DLQ_TOPIC: ${DLQ_TOPIC:-}
+    TOPIC_RETENTION_MS: ${TOPIC_RETENTION_MS:-259200000}
+    DLQ_RETENTION_MS: ${DLQ_RETENTION_MS:-604800000}
+    DATA_PATH: ${DATA_PATH:-}
+    KEY_FIELD: ${KEY_FIELD:-}
+    GENERATOR_MODE: ${GENERATOR_MODE:-burst}
+    # Storage credentials (forwarded to DockerOperator containers)
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_REGION: ${AWS_REGION}
+    WAREHOUSE: ${WAREHOUSE}
+    DUCKDB_S3_ENDPOINT: ${DUCKDB_S3_ENDPOINT}
+    DUCKDB_S3_USE_SSL: ${DUCKDB_S3_USE_SSL}
+    DUCKDB_UNSAFE_ENABLE_VERSION_GUESSING: ${DUCKDB_UNSAFE_ENABLE_VERSION_GUESSING}
+    BRONZE_TABLE: ${BRONZE_TABLE}
+    SILVER_TABLE: ${SILVER_TABLE}
+    ALLOW_EMPTY: ${ALLOW_EMPTY:-false}
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+  networks:
+    - pipeline-net
+
+services:
+  # ---------------------------------------------------------------------------
+  # Airflow metadata database
+  # ---------------------------------------------------------------------------
+  airflow-postgres:
+    image: postgres:16-alpine
+    container_name: template-airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - orchestration
+    networks:
+      - pipeline-net
+
+  # ---------------------------------------------------------------------------
+  # Celery broker (Redis)
+  # ---------------------------------------------------------------------------
+  airflow-redis:
+    image: redis:7-alpine
+    container_name: template-airflow-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    profiles:
+      - orchestration
+    networks:
+      - pipeline-net
+
+  # ---------------------------------------------------------------------------
+  # One-shot DB migration + admin user creation (runs then exits)
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: template-airflow-init
+    entrypoint: /bin/bash
+    command: >
+      -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@de-template.local
+          --password admin
+      "
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+    profiles:
+      - orchestration
+
+  # ---------------------------------------------------------------------------
+  # Airflow webserver (UI on :8080)
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: template-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+    profiles:
+      - orchestration
+
+  # ---------------------------------------------------------------------------
+  # Airflow scheduler — needs Docker socket to exec into pipeline containers
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: template-airflow-scheduler
+    command: scheduler
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+    profiles:
+      - orchestration
+
+  # ---------------------------------------------------------------------------
+  # Airflow Celery worker — needs Docker socket for DockerOperator tasks
+  # ---------------------------------------------------------------------------
+  airflow-worker:
+    <<: *airflow-common
+    container_name: template-airflow-worker
+    command: celery worker
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_DATA_DIR}:/data:ro   # data available to DockerOperator generator task
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-redis:
+        condition: service_healthy
+    profiles:
+      - orchestration
+
+volumes:
+  airflow-postgres-data:
+  airflow-logs:

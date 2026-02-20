@@ -1,9 +1,9 @@
 services:
   # =============================================================================
-  # Prometheus — Scrapes Flink metrics (--profile obs)
+  # Prometheus — Scrapes Flink + Redpanda metrics (starts with `make up`)
   # =============================================================================
-  # Start with: docker compose ... --profile obs up
   # Flink JobManager exposes metrics at port 9249 (set in flink/conf/config.yaml)
+  # Redpanda exposes metrics at port 9644 (/public_metrics)
   prometheus:
     image: prom/prometheus:v2.50.1
     container_name: template-prometheus
@@ -17,13 +17,11 @@ services:
       - --storage.tsdb.path=/prometheus
       - --web.console.libraries=/usr/share/prometheus/console_libraries
       - --web.console.templates=/usr/share/prometheus/consoles
-    profiles:
-      - obs
     networks:
       - pipeline-net
 
   # =============================================================================
-  # Grafana — Visualize Flink + Kafka metrics (--profile obs)
+  # Grafana — Visualize Flink + Kafka metrics (starts with `make up`)
   # =============================================================================
   grafana:
     image: grafana/grafana:10.3.1
@@ -41,8 +39,6 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
-    profiles:
-      - obs
     networks:
       - pipeline-net
 

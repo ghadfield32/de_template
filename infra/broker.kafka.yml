@@ -35,3 +35,22 @@ services:
       start_period: 30s
     networks:
       - pipeline-net
+
+  # =============================================================================
+  # Kafka UI (web UI for topic inspection — start with: make console-up)
+  # =============================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: template-kafka-ui
+    ports:
+      - "8085:8080"   # Kafka UI web interface
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:9092
+    depends_on:
+      broker:
+        condition: service_healthy
+    profiles:
+      - console
+    networks:
+      - pipeline-net

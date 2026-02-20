@@ -13,3 +13,11 @@ scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
+
+  # Redpanda broker metrics (only relevant when BROKER=redpanda)
+  # Kafka equivalent requires a JMX exporter sidecar — see docs/07_observability.md
+  - job_name: 'redpanda'
+    static_configs:
+      - targets: ['broker:9644']
+    metrics_path: /public_metrics
+    scrape_interval: 15s
