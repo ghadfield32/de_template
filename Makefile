@@ -39,6 +39,7 @@ GENERATOR_MODE ?= burst
 DATASET_NAME ?=
 RUN_METRICS_MAX_AGE_MINUTES ?= 120
 ALLOW_STALE_RUN_METRICS ?= false
+export ALLOW_STALE_RUN_METRICS
 REQUIRE_RUN_METRICS ?= true
 BRONZE_TABLE ?= bronze.raw_trips
 SILVER_TABLE ?= silver.cleaned_trips
@@ -89,6 +90,13 @@ VALIDATE_SCHEMA := $(strip $(VALIDATE_SCHEMA))
 SCHEMA_PATH := $(strip $(SCHEMA_PATH))
 BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS := $(strip $(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS))
 BENCHMARK_POLL_SECONDS := $(strip $(BENCHMARK_POLL_SECONDS))
+
+# --- Certification (tests/cert/) ---
+# CERT_DATA_DIR: where generated cert Parquet files live (build/cert/ — gitignored)
+# CERT_DATASET:  dataset name used to name cert files (e.g. "taxi" → taxi_clean.parquet)
+CERT_DATA_DIR    ?= $(abspath $(CURDIR)/build/cert)
+CERT_DATASET     ?= $(or $(strip $(DATASET_NAME)),taxi)
+CERT_REPORT_PATH ?= build/cert_report.json
 
 # --- Data directory (host-side, passed to docker compose via environment) ---
 # Absolute path is used so Docker Compose gets an unambiguous bind mount source
@@ -483,7 +491,7 @@ dbt-docs: ## Generate dbt documentation
 validate: validate-py ## Run 4-stage smoke test (typed Python validator)
 
 validate-py: ## Run 4-stage smoke test (Python via uv)
-	uv run python scripts/validate.py
+	PYTHONUTF8=1 uv run python scripts/validate.py
 
 # =============================================================================
 # Developer Setup & Tests  (managed by uv — see pyproject.toml)
@@ -636,6 +644,86 @@ benchmark: ## Full benchmark: down → up → topics → generate → process �
 	    > benchmark_results/latest.json && \
 	echo "Results saved to benchmark_results/latest.json" && \
 	$(MAKE) down
+
+# =============================================================================
+# Real-Data Certification (tests/cert/)
+# =============================================================================
+# cert-datasets:        generate deterministic Parquet fixtures from the dataset manifest
+# cert-report:          print row-accounting report (actual vs. expected counts)
+# certify-real:         full clean-slate certification with cert_clean.parquet
+# certify-edge-cases:   full clean-slate certification verifying filter+dedup accounting
+
+cert-datasets: ## Generate deterministic cert datasets → build/cert/  (uses dataset manifest)
+	uv run python tests/cert/make_cert_datasets.py
+
+cert-report: ## Print row-accounting certification report (reads Iceberg + run_metrics.json)
+	PYTHONUTF8=1 uv run python tests/cert/cert_report.py
+
+generate-cert-clean: ## Produce $(CERT_DATASET)_clean.parquet events to broker
+	MSYS_NO_PATHCONV=1 HOST_DATA_DIR=$(CERT_DATA_DIR) \
+	    $(COMPOSE) run --rm \
+	    -e DATA_PATH=/data/$(CERT_DATASET)_clean.parquet \
+	    data-generator
+	@$(MAKE) persist-run-metrics
+
+generate-cert-edge: ## Produce $(CERT_DATASET)_edge_cases.parquet events to broker
+	MSYS_NO_PATHCONV=1 HOST_DATA_DIR=$(CERT_DATA_DIR) \
+	    $(COMPOSE) run --rm \
+	    -e DATA_PATH=/data/$(CERT_DATASET)_edge_cases.parquet \
+	    data-generator
+	@$(MAKE) persist-run-metrics
+
+certify-real: ## Clean-slate real-data certification: cert_clean → full pipeline (stack stays up)
+	@echo "============================================================"
+	@echo "  de_template Real-Data Certification ($(CERT_DATASET)_clean)"
+	@echo "  BROKER=$(BROKER)  STORAGE=$(STORAGE)  MODE=$(MODE)"
+	@echo "============================================================"
+	@$(MAKE) cert-datasets
+	@$(MAKE) down 2>/dev/null || true
+	@# Command-line overrides take precedence over include .env — validate-config finds cert file
+	@$(MAKE) up HOST_DATA_DIR=$(CERT_DATA_DIR) DATA_PATH=/data/$(CERT_DATASET)_clean.parquet
+	@echo "Waiting for Flink Dashboard to become reachable..."
+	@timeout $(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS) bash -c \
+	    "until curl -sf http://localhost:8081/overview > /dev/null; do sleep $(BENCHMARK_POLL_SECONDS); done"
+	@$(MAKE) create-topics
+	@$(MAKE) generate-cert-clean
+	@$(MAKE) process
+	@$(MAKE) wait-for-silver
+	@$(MAKE) dbt-build
+	@$(MAKE) cert-report
+	@# Pass ALLOW_STALE_RUN_METRICS as a Make command-line override (highest precedence) so
+	@# validate tolerates the container vs host data_path difference; all counts already
+	@# verified by cert-report above.
+	@$(MAKE) validate ALLOW_STALE_RUN_METRICS=true
+	@echo "============================================================"
+	@echo "  CERTIFICATION COMPLETE"
+	@echo "  Inspect: make status | make logs-flink | make check-lag"
+	@echo "  Report:  cat $(CERT_REPORT_PATH)"
+	@echo "  Teardown: make down"
+	@echo "============================================================"
+
+certify-edge-cases: ## Clean-slate edge-case certification: verify filter+dedup row accounting
+	@echo "============================================================"
+	@echo "  de_template Edge-Case Certification ($(CERT_DATASET)_edge_cases)"
+	@echo "  BROKER=$(BROKER)  STORAGE=$(STORAGE)  MODE=$(MODE)"
+	@echo "============================================================"
+	@$(MAKE) cert-datasets
+	@$(MAKE) down 2>/dev/null || true
+	@# Command-line overrides take precedence over include .env — validate-config finds cert file
+	@$(MAKE) up HOST_DATA_DIR=$(CERT_DATA_DIR) DATA_PATH=/data/$(CERT_DATASET)_edge_cases.parquet
+	@echo "Waiting for Flink Dashboard to become reachable..."
+	@timeout $(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS) bash -c \
+	    "until curl -sf http://localhost:8081/overview > /dev/null; do sleep $(BENCHMARK_POLL_SECONDS); done"
+	@$(MAKE) create-topics
+	@$(MAKE) generate-cert-edge
+	@$(MAKE) process
+	@$(MAKE) wait-for-silver WAIT_FOR_SILVER_MIN_ROWS=1
+	@$(MAKE) cert-report
+	@echo "============================================================"
+	@echo "  EDGE-CASE CERTIFICATION COMPLETE"
+	@echo "  Report:  cat $(CERT_REPORT_PATH)"
+	@echo "  Teardown: make down"
+	@echo "============================================================"
 
 # =============================================================================
 # Flink Job Lifecycle (streaming operational control)
