@@ -5,16 +5,21 @@ description = "Data engineering lakehouse pipeline template (Flink + Iceberg + d
 readme = "README.md"
 requires-python = ">=3.11"
 
-# Host-side runtime deps — config validation and pipeline scripts.
-# Docker containers manage their own runtime deps independently.
+# Shared deps — installed on the HOST (.venv) AND baked into the tooling container.
+# These are the foundation used by config/settings.py, scripts/scaffold_dataset.py,
+# scripts/dataset_manifest.py, and dbt-core (which depends on pydantic internally).
 dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
-    "pyyaml>=6.0",      # dataset manifest (scaffold_dataset.py)
+    "pyyaml>=6.0",      # dataset manifest (scaffold_dataset.py, dataset_manifest.py)
     "jinja2>=3.1",      # Jinja2 templates for dataset scaffolding
 ]
 
 [dependency-groups]
+
+# =============================================================================
+# dev — host tooling only (lint, type-check, tests). NOT installed in Docker.
+# =============================================================================
 dev = [
     "pytest>=7.4",
     "pytest-timeout>=2.0",
@@ -22,6 +27,45 @@ dev = [
     "ruff>=0.4",          # lint + format
     "pyright>=1.1",       # type checking
     "pyarrow>=14.0",      # CI fixture generator (tests/fixtures/make_parquet.py)
+]
+
+# =============================================================================
+# container — baked into docker/tooling.Dockerfile.
+# Add new pipeline deps here, then: uv lock && docker compose build
+#   Quick add:  uv add --group container <package>
+# =============================================================================
+container = [
+    "pyarrow>=14.0.0",             # generator.py: Parquet reads (pq.read_table)
+    "confluent-kafka>=2.3.0",      # generator.py: Kafka producer
+    "orjson>=3.9.0",               # generator.py: fast JSON serialization
+    "jsonschema>=4.0.0",           # generator.py: optional schema validation
+    "dbt-core>=1.8",               # dbt service: model compilation + execution
+    "dbt-duckdb>=1.8.0,<2.0.0",   # dbt service: DuckDB adapter for Iceberg reads
+    "duckdb",                      # wait_for_iceberg.py, count_iceberg.py: Iceberg queries
+    "pandas",                      # dbt-duckdb: DataFrame operations
+]
+
+# =============================================================================
+# data-connectors — API clients and DB drivers for data ingestion.
+# Add libraries here when your pipeline needs to pull from external sources.
+#
+#   Quick add:  uv add --group data-connectors <package>
+#   Then:       uv lock && docker compose build
+#
+# Examples (uncomment to enable):
+# =============================================================================
+data-connectors = [
+    # "httpx>=0.27",                    # Async HTTP — REST APIs, webhooks
+    # "requests>=2.31",                 # Sync HTTP — simple API calls
+    # "boto3>=1.34",                    # AWS SDK — S3, Kinesis, DynamoDB, SQS
+    # "sqlalchemy>=2.0",                # SQL databases (generic ORM/core)
+    # "psycopg2-binary>=2.9",           # PostgreSQL
+    # "pymysql>=1.1",                   # MySQL / MariaDB
+    # "google-cloud-bigquery>=3.0",     # BigQuery source reads
+    # "google-cloud-storage>=2.0",      # GCS (alternative to boto3 for GCS)
+    # "azure-storage-blob>=12.0",       # Azure Blob Storage
+    # "snowflake-connector-python>=3.0",# Snowflake source reads
+    # "kafka-python>=2.0",              # Kafka admin client (topic inspection)
 ]
 
 # =============================================================================
@@ -82,5 +126,8 @@ reportMissingTypeStubs = false   # third-party stubs often missing — not an er
 # =============================================================================
 [tool.uv]
 # Keep .venv inside the project root for IDE discoverability
-# (most editors auto-detect .venv at the project root)
-package = false   # this is a scripts-only project, not a distributable package
+package = false   # scripts-only project, not a distributable package
+# Only sync the dev group on the host. The container group has Linux-only C extensions
+# (confluent-kafka needs librdkafka) that can't be pip-installed on Windows/Mac.
+# Docker builds use: uv sync --group container --group data-connectors --no-group dev
+default-groups = ["dev"]

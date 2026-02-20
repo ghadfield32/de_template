@@ -129,7 +129,7 @@ FLINK_SQL_CLIENT = MSYS_NO_PATHCONV=1 $(COMPOSE) exec -T flink-jobmanager /opt/f
         wait-for-silver \
         dbt-build dbt-test dbt-docs \
         validate validate-py health check-lag \
-        setup-dev venv-reset test test-unit test-integration \
+        setup-dev add-dep venv-reset test test-unit test-integration \
         fmt lint type ci \
         scaffold scaffold-validate \
         obs-up obs-down \
@@ -488,9 +488,33 @@ validate-py: ## Run 4-stage smoke test (Python via uv)
 # =============================================================================
 # Developer Setup & Tests  (managed by uv — see pyproject.toml)
 # =============================================================================
+# Dependency groups in pyproject.toml:
+#   [project.dependencies]          — shared base (pydantic, pyyaml, jinja2)
+#   [dependency-groups.dev]         — host-only tools (pytest, ruff, pyright) ← synced here
+#   [dependency-groups.container]   — Docker tooling image runtime deps
+#   [dependency-groups.data-connectors] — API clients / DB drivers (extend as needed)
+#
+# To add a new dep to the tooling container:
+#   make add-dep PKG="httpx>=0.27"                        → adds to container group
+#   make add-dep GROUP=data-connectors PKG="sqlalchemy"   → adds to data-connectors group
+# Then rebuild: docker compose build (or make up)
+# =============================================================================
 
-setup-dev: ## Create/sync .venv and install all deps (uv required)
+setup-dev: ## Create/sync .venv with dev tools (pytest, ruff, pyright)
 	uv sync
+
+add-dep: ## Add a dep to pyproject.toml: make add-dep PKG="httpx>=0.27" [GROUP=container]
+ifndef PKG
+	@echo "Usage: make add-dep PKG='<package>[>=version]' [GROUP=<container|data-connectors|dev>]"
+	@echo "  Default GROUP=container (container tooling image)"
+	@echo "  After adding: docker compose build (or make up) to rebuild the tooling image"
+	@exit 1
+endif
+	uv add --group $(or $(GROUP),container) $(PKG)
+	@echo ""
+	@echo "Added '$(PKG)' to group '$(or $(GROUP),container)' in pyproject.toml + uv.lock"
+	@echo "Rebuild the tooling image to make it available in containers:"
+	@echo "  docker compose build"
 
 venv-reset: ## Delete and recreate .venv (fixes WSL/Windows cross-platform venv contamination)
 	@echo "Removing .venv..."
