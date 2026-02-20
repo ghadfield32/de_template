@@ -21,7 +21,7 @@ STAGE = "1-infrastructure"
 
 def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:  # noqa: ARG001
     if cfg.STORAGE == "minio":
-        return [_check_minio()]
+        return [_check_minio(cfg.HEALTH_HTTP_TIMEOUT_SECONDS)]
     # Cloud storage auth is validated at pipeline runtime, not here
     return [
         CheckResult(
@@ -33,10 +33,10 @@ def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:  # 
     ]
 
 
-def _check_minio() -> CheckResult:
+def _check_minio(timeout_seconds: int) -> CheckResult:
     url = "http://localhost:9000/minio/health/live"
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as resp:
             passed = resp.status == 200
             return CheckResult(
                 STAGE,

@@ -18,10 +18,10 @@ services:
       # leave them unset so DefaultAWSCredentialsProviderChain picks up IAM roles.
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_REGION: ${AWS_REGION}
     volumes:
       - ../build/sql:/opt/flink/sql:ro
-      - ../flink/conf/config.yaml:/opt/flink/conf/config.yaml:ro
+      - ../build/conf/config.yaml:/opt/flink/conf/config.yaml:ro
       - ../build/conf/core-site.xml:/opt/hadoop/conf/core-site.xml:ro
     cpus: "1.0"
     mem_limit: 1g
@@ -48,10 +48,10 @@ services:
       HADOOP_CONF_DIR: /opt/hadoop/conf
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_REGION: ${AWS_REGION}
     volumes:
       - ../build/sql:/opt/flink/sql:ro
-      - ../flink/conf/config.yaml:/opt/flink/conf/config.yaml:ro
+      - ../build/conf/config.yaml:/opt/flink/conf/config.yaml:ro
       - ../build/conf/core-site.xml:/opt/hadoop/conf/core-site.xml:ro
     cpus: "2.0"
     mem_limit: 2g
@@ -80,9 +80,17 @@ services:
     environment:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      DUCKDB_S3_ENDPOINT: ${DUCKDB_S3_ENDPOINT:-minio:9000}
-      DUCKDB_S3_USE_SSL: ${DUCKDB_S3_USE_SSL:-false}
-      WAREHOUSE: ${WAREHOUSE:-s3a://warehouse/}
+      AWS_REGION: ${AWS_REGION}
+      DUCKDB_S3_ENDPOINT: ${DUCKDB_S3_ENDPOINT}
+      DUCKDB_S3_USE_SSL: ${DUCKDB_S3_USE_SSL}
+      DUCKDB_UNSAFE_ENABLE_VERSION_GUESSING: ${DUCKDB_UNSAFE_ENABLE_VERSION_GUESSING}
+      WAREHOUSE: ${WAREHOUSE}
+      BRONZE_TABLE: ${BRONZE_TABLE}
+      SILVER_TABLE: ${SILVER_TABLE}
+      WAIT_FOR_SILVER_MIN_ROWS: ${WAIT_FOR_SILVER_MIN_ROWS}
+      WAIT_FOR_SILVER_TIMEOUT_SECONDS: ${WAIT_FOR_SILVER_TIMEOUT_SECONDS}
+      WAIT_FOR_SILVER_POLL_SECONDS: ${WAIT_FOR_SILVER_POLL_SECONDS}
+      ALLOW_EMPTY: ${ALLOW_EMPTY}
     profiles:
       - dbt
     networks:
@@ -97,14 +105,20 @@ services:
     container_name: template-generator
     environment:
       BROKER_URL: broker:9092
-      TOPIC: ${TOPIC:-taxi.raw_trips}
-      DLQ_TOPIC: ${DLQ_TOPIC:-taxi.raw_trips.dlq}
-      DATA_PATH: ${DATA_PATH:-/data/yellow_tripdata_2024-01.parquet}
-      MAX_EVENTS: ${MAX_EVENTS:-0}
+      TOPIC: ${TOPIC}
+      DLQ_TOPIC: ${DLQ_TOPIC}
+      DATA_PATH: ${DATA_PATH}
+      MAX_EVENTS: ${MAX_EVENTS}
+      GENERATOR_MODE: ${GENERATOR_MODE}
+      RATE_LIMIT: ${RATE_LIMIT}
+      BATCH_SIZE: ${BATCH_SIZE}
+      BATCH_DELAY: ${BATCH_DELAY}
       METRICS_PATH: /metrics/latest.json
+      DATASET: ${DATASET_NAME}
+      KEY_FIELD: ${KEY_FIELD}
       # Schema validation (opt-in — set VALIDATE_SCHEMA=true in .env to enable)
-      VALIDATE_SCHEMA: ${VALIDATE_SCHEMA:-false}
-      SCHEMA_PATH: ${SCHEMA_PATH:-/schemas/taxi_trip.json}
+      VALIDATE_SCHEMA: ${VALIDATE_SCHEMA}
+      SCHEMA_PATH: ${SCHEMA_PATH}
     volumes:
       - ${HOST_DATA_DIR}:/data:ro   # absolute path set by Makefile (repo-root data/)
       - metrics-vol:/metrics

@@ -34,6 +34,29 @@ BROKER   ?= redpanda
 CATALOG  ?= hadoop
 STORAGE  ?= minio
 MODE     ?= batch
+ALLOW_EMPTY ?= false
+GENERATOR_MODE ?= burst
+DATASET_NAME ?=
+RUN_METRICS_MAX_AGE_MINUTES ?= 120
+ALLOW_STALE_RUN_METRICS ?= false
+REQUIRE_RUN_METRICS ?= true
+BRONZE_TABLE ?= bronze.raw_trips
+SILVER_TABLE ?= silver.cleaned_trips
+BRONZE_COMPLETENESS_RATIO ?= 0.95
+WAIT_FOR_SILVER_MIN_ROWS ?= 1
+WAIT_FOR_SILVER_TIMEOUT_SECONDS ?= 90
+WAIT_FOR_SILVER_POLL_SECONDS ?= 5
+HEALTH_HTTP_TIMEOUT_SECONDS ?= 5
+HEALTH_DOCKER_TIMEOUT_SECONDS ?= 15
+ICEBERG_QUERY_TIMEOUT_SECONDS ?= 90
+ICEBERG_METADATA_TIMEOUT_SECONDS ?= 30
+DLQ_READ_TIMEOUT_SECONDS ?= 10
+DBT_TEST_TIMEOUT_SECONDS ?= 300
+DOCTOR_DBT_PARSE ?= false
+VALIDATE_SCHEMA ?= false
+SCHEMA_PATH ?= /schemas/taxi_trip.json
+BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS ?= 180
+BENCHMARK_POLL_SECONDS ?= 5
 
 # GNU make reads .env via `include` as a makefile fragment.
 # Lines like "BROKER=redpanda  # comment" leave trailing whitespace in the value.
@@ -43,6 +66,29 @@ BROKER   := $(strip $(BROKER))
 CATALOG  := $(strip $(CATALOG))
 STORAGE  := $(strip $(STORAGE))
 MODE     := $(strip $(MODE))
+ALLOW_EMPTY := $(strip $(ALLOW_EMPTY))
+GENERATOR_MODE := $(strip $(GENERATOR_MODE))
+DATASET_NAME := $(strip $(DATASET_NAME))
+RUN_METRICS_MAX_AGE_MINUTES := $(strip $(RUN_METRICS_MAX_AGE_MINUTES))
+ALLOW_STALE_RUN_METRICS := $(strip $(ALLOW_STALE_RUN_METRICS))
+REQUIRE_RUN_METRICS := $(strip $(REQUIRE_RUN_METRICS))
+BRONZE_TABLE := $(strip $(BRONZE_TABLE))
+SILVER_TABLE := $(strip $(SILVER_TABLE))
+BRONZE_COMPLETENESS_RATIO := $(strip $(BRONZE_COMPLETENESS_RATIO))
+WAIT_FOR_SILVER_MIN_ROWS := $(strip $(WAIT_FOR_SILVER_MIN_ROWS))
+WAIT_FOR_SILVER_TIMEOUT_SECONDS := $(strip $(WAIT_FOR_SILVER_TIMEOUT_SECONDS))
+WAIT_FOR_SILVER_POLL_SECONDS := $(strip $(WAIT_FOR_SILVER_POLL_SECONDS))
+HEALTH_HTTP_TIMEOUT_SECONDS := $(strip $(HEALTH_HTTP_TIMEOUT_SECONDS))
+HEALTH_DOCKER_TIMEOUT_SECONDS := $(strip $(HEALTH_DOCKER_TIMEOUT_SECONDS))
+ICEBERG_QUERY_TIMEOUT_SECONDS := $(strip $(ICEBERG_QUERY_TIMEOUT_SECONDS))
+ICEBERG_METADATA_TIMEOUT_SECONDS := $(strip $(ICEBERG_METADATA_TIMEOUT_SECONDS))
+DLQ_READ_TIMEOUT_SECONDS := $(strip $(DLQ_READ_TIMEOUT_SECONDS))
+DBT_TEST_TIMEOUT_SECONDS := $(strip $(DBT_TEST_TIMEOUT_SECONDS))
+DOCTOR_DBT_PARSE := $(strip $(DOCTOR_DBT_PARSE))
+VALIDATE_SCHEMA := $(strip $(VALIDATE_SCHEMA))
+SCHEMA_PATH := $(strip $(SCHEMA_PATH))
+BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS := $(strip $(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS))
+BENCHMARK_POLL_SECONDS := $(strip $(BENCHMARK_POLL_SECONDS))
 
 # --- Data directory (host-side, passed to docker compose via environment) ---
 # Absolute path is used so Docker Compose gets an unambiguous bind mount source
@@ -69,18 +115,19 @@ COMPOSE          = docker compose $(COMPOSE_FILES)
 FLINK_SQL_CLIENT = MSYS_NO_PATHCONV=1 $(COMPOSE) exec -T flink-jobmanager /opt/flink/bin/sql-client.sh embedded
 
 .PHONY: help print-config validate-config \
+        doctor \
         env-select \
         up down clean restart \
         build-sql show-sql \
         create-topics \
-        generate generate-limited \
+        generate generate-limited persist-run-metrics \
         process process-bronze process-silver process-streaming \
         wait-for-silver \
         dbt-build dbt-test dbt-docs \
         validate validate-py health check-lag \
         setup-dev test test-unit test-integration \
         fmt lint type ci \
-        scaffold \
+        scaffold scaffold-validate \
         obs-up obs-down \
         benchmark \
         flink-jobs flink-cancel flink-restart-streaming \
@@ -111,6 +158,28 @@ debug-env: ## Show raw variable values with [brackets] to expose whitespace/path
 	@echo "CATALOG       = [$(CATALOG)]"
 	@echo "STORAGE       = [$(STORAGE)]"
 	@echo "MODE          = [$(MODE)]"
+	@echo "GENERATOR_MODE = [$(GENERATOR_MODE)]"
+	@echo "ALLOW_EMPTY   = [$(ALLOW_EMPTY)]"
+	@echo "DATASET_NAME  = [$(DATASET_NAME)]"
+	@echo "RUN_METRICS_MAX_AGE_MINUTES = [$(RUN_METRICS_MAX_AGE_MINUTES)]"
+	@echo "ALLOW_STALE_RUN_METRICS     = [$(ALLOW_STALE_RUN_METRICS)]"
+	@echo "REQUIRE_RUN_METRICS         = [$(REQUIRE_RUN_METRICS)]"
+	@echo "BRONZE_TABLE = [$(BRONZE_TABLE)]"
+	@echo "SILVER_TABLE = [$(SILVER_TABLE)]"
+	@echo "BRONZE_COMPLETENESS_RATIO = [$(BRONZE_COMPLETENESS_RATIO)]"
+	@echo "WAIT_FOR_SILVER_MIN_ROWS = [$(WAIT_FOR_SILVER_MIN_ROWS)]"
+	@echo "WAIT_FOR_SILVER_TIMEOUT_SECONDS = [$(WAIT_FOR_SILVER_TIMEOUT_SECONDS)]"
+	@echo "WAIT_FOR_SILVER_POLL_SECONDS = [$(WAIT_FOR_SILVER_POLL_SECONDS)]"
+	@echo "HEALTH_HTTP_TIMEOUT_SECONDS = [$(HEALTH_HTTP_TIMEOUT_SECONDS)]"
+	@echo "HEALTH_DOCKER_TIMEOUT_SECONDS = [$(HEALTH_DOCKER_TIMEOUT_SECONDS)]"
+	@echo "ICEBERG_QUERY_TIMEOUT_SECONDS = [$(ICEBERG_QUERY_TIMEOUT_SECONDS)]"
+	@echo "ICEBERG_METADATA_TIMEOUT_SECONDS = [$(ICEBERG_METADATA_TIMEOUT_SECONDS)]"
+	@echo "DLQ_READ_TIMEOUT_SECONDS = [$(DLQ_READ_TIMEOUT_SECONDS)]"
+	@echo "DBT_TEST_TIMEOUT_SECONDS = [$(DBT_TEST_TIMEOUT_SECONDS)]"
+	@echo "VALIDATE_SCHEMA = [$(VALIDATE_SCHEMA)]"
+	@echo "SCHEMA_PATH = [$(SCHEMA_PATH)]"
+	@echo "BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS = [$(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS)]"
+	@echo "BENCHMARK_POLL_SECONDS = [$(BENCHMARK_POLL_SECONDS)]"
 	@echo "COMPOSE_FILES = [$(COMPOSE_FILES)]"
 	@echo "HOST_DATA_DIR = [$(HOST_DATA_DIR)]"
 	@echo "DATA_PATH     = [$(DATA_PATH)]"
@@ -127,6 +196,28 @@ print-config: ## Echo all resolved configuration axes
 	@echo "CATALOG  = $(CATALOG)"
 	@echo "STORAGE  = $(STORAGE)"
 	@echo "MODE     = $(MODE)"
+	@echo "GENERATOR_MODE= $(GENERATOR_MODE)"
+	@echo "ALLOW_EMPTY= $(ALLOW_EMPTY)"
+	@echo "DATASET_NAME= $(DATASET_NAME)"
+	@echo "RUN_METRICS_MAX_AGE_MINUTES= $(RUN_METRICS_MAX_AGE_MINUTES)"
+	@echo "ALLOW_STALE_RUN_METRICS= $(ALLOW_STALE_RUN_METRICS)"
+	@echo "REQUIRE_RUN_METRICS= $(REQUIRE_RUN_METRICS)"
+	@echo "BRONZE_TABLE= $(BRONZE_TABLE)"
+	@echo "SILVER_TABLE= $(SILVER_TABLE)"
+	@echo "BRONZE_COMPLETENESS_RATIO= $(BRONZE_COMPLETENESS_RATIO)"
+	@echo "WAIT_FOR_SILVER_MIN_ROWS= $(WAIT_FOR_SILVER_MIN_ROWS)"
+	@echo "WAIT_FOR_SILVER_TIMEOUT_SECONDS= $(WAIT_FOR_SILVER_TIMEOUT_SECONDS)"
+	@echo "WAIT_FOR_SILVER_POLL_SECONDS= $(WAIT_FOR_SILVER_POLL_SECONDS)"
+	@echo "HEALTH_HTTP_TIMEOUT_SECONDS= $(HEALTH_HTTP_TIMEOUT_SECONDS)"
+	@echo "HEALTH_DOCKER_TIMEOUT_SECONDS= $(HEALTH_DOCKER_TIMEOUT_SECONDS)"
+	@echo "ICEBERG_QUERY_TIMEOUT_SECONDS= $(ICEBERG_QUERY_TIMEOUT_SECONDS)"
+	@echo "ICEBERG_METADATA_TIMEOUT_SECONDS= $(ICEBERG_METADATA_TIMEOUT_SECONDS)"
+	@echo "DLQ_READ_TIMEOUT_SECONDS= $(DLQ_READ_TIMEOUT_SECONDS)"
+	@echo "DBT_TEST_TIMEOUT_SECONDS= $(DBT_TEST_TIMEOUT_SECONDS)"
+	@echo "VALIDATE_SCHEMA= $(VALIDATE_SCHEMA)"
+	@echo "SCHEMA_PATH= $(SCHEMA_PATH)"
+	@echo "BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS= $(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS)"
+	@echo "BENCHMARK_POLL_SECONDS= $(BENCHMARK_POLL_SECONDS)"
 	@echo "TOPIC    = $(TOPIC)"
 	@echo "DLQ_TOPIC= $(DLQ_TOPIC)"
 	@echo "DLQ_MAX  = $(DLQ_MAX)"
@@ -142,25 +233,7 @@ ifeq ($(CATALOG),rest)
 	@$(COMPOSE) --profile catalog-rest config --quiet 2>/dev/null \
 		|| (echo "ERROR: CATALOG=rest config invalid — check infra/catalog.rest-lakekeeper.yml" && exit 1)
 endif
-ifeq ($(STORAGE),minio)
-	@[ -n "$(MINIO_ROOT_USER)" ] \
-		|| (echo "ERROR: MINIO_ROOT_USER not set in .env" && exit 1)
-	@[ -n "$(MINIO_ROOT_PASSWORD)" ] \
-		|| (echo "ERROR: MINIO_ROOT_PASSWORD not set in .env" && exit 1)
-	@[ -n "$(S3_ENDPOINT)" ] \
-		|| (echo "ERROR: STORAGE=minio requires S3_ENDPOINT in .env (e.g. http://minio:9000)" && exit 1)
-	@[ "$(S3_PATH_STYLE)" = "true" ] \
-		|| (echo "WARN: STORAGE=minio should have S3_PATH_STYLE=true in .env")
-endif
-ifeq ($(STORAGE),aws_s3)
-	@echo "$(S3_ENDPOINT)" | grep -qi "minio" \
-		&& echo "WARN: STORAGE=aws_s3 but S3_ENDPOINT contains 'minio' — did you mean STORAGE=minio?" \
-		|| true
-endif
-	@[ -n "$(TOPIC)" ] \
-		|| (echo "ERROR: TOPIC not set in .env" && exit 1)
-	@[ -n "$(WAREHOUSE)" ] \
-		|| (echo "ERROR: WAREHOUSE not set in .env" && exit 1)
+	@uv run python -c "from config.settings import load_settings; s=load_settings(); print(f'Config schema OK: BROKER=[{s.BROKER}] CATALOG=[{s.CATALOG}] STORAGE=[{s.STORAGE}] MODE=[{s.MODE}] GENERATOR_MODE=[{s.GENERATOR_MODE}]')"
 	@# Verify data file exists on the host before starting containers
 	@DATA_FILE="$(HOST_DATA_DIR)/$(notdir $(DATA_PATH))"; \
 	    [ -f "$$DATA_FILE" ] \
@@ -170,8 +243,37 @@ endif
 	        && echo "  Place your parquet file at $$DATA_FILE" \
 	        && echo "  or set HOST_DATA_DIR in .env to its parent directory." \
 	        && exit 1)
-	@echo "Config OK: BROKER=[$(BROKER)] CATALOG=[$(CATALOG)] STORAGE=[$(STORAGE)] MODE=[$(MODE)]"
+	@echo "Config + data path check OK."
 	@echo "Data file: $(HOST_DATA_DIR)/$(notdir $(DATA_PATH))"
+
+doctor: ## Run local diagnostics (settings, manifests, template render, docker, compose)
+	@echo "=== de_template doctor ==="
+	@echo "[1/7] Settings schema"
+	@uv run python -c "from config.settings import load_settings; s=load_settings(); print(f'OK: BROKER={s.BROKER} MODE={s.MODE} GENERATOR_MODE={s.GENERATOR_MODE} STORAGE={s.STORAGE}')"
+	@echo "[2/7] Dataset manifests"
+	@uv run python -c "from scripts.dataset_manifest import available_datasets, parse_manifest; ds = available_datasets(); [parse_manifest(d) for d in ds]; print('OK: ' + (', '.join(ds) if ds else '(no datasets found)'))"
+	@echo "[3/7] SQL/conf render"
+	@$(MAKE) build-sql
+	@echo "[4/7] Host data path"
+	@DATA_FILE="$(HOST_DATA_DIR)/$(notdir $(DATA_PATH))"; \
+	    [ -f "$$DATA_FILE" ] \
+	    && echo "OK: $$DATA_FILE" \
+	    || (echo "ERROR: missing parquet file: $$DATA_FILE" && exit 1)
+	@echo "[5/7] Docker daemon"
+	@docker info > /dev/null 2>&1 \
+	    && echo "OK: docker daemon reachable" \
+	    || (echo "ERROR: docker daemon is not reachable" && exit 1)
+	@echo "[6/7] Docker compose config"
+	@mkdir -p build
+	@$(COMPOSE) config > build/doctor.compose.yml
+	@echo "OK: build/doctor.compose.yml"
+	@echo "[7/7] dbt parse"
+	@if [ "$(DOCTOR_DBT_PARSE)" = "true" ] || [ "$(DOCTOR_DBT_PARSE)" = "TRUE" ] || [ "$(DOCTOR_DBT_PARSE)" = "1" ] || [ "$(DOCTOR_DBT_PARSE)" = "yes" ] || [ "$(DOCTOR_DBT_PARSE)" = "YES" ]; then \
+	    MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps --entrypoint /bin/sh dbt -c "dbt parse --profiles-dir ."; \
+	    echo "OK: dbt parse"; \
+	else \
+	    echo "SKIP: set DOCTOR_DBT_PARSE=true to run dbt parse"; \
+	fi
 
 # =============================================================================
 # Lifecycle
@@ -220,6 +322,7 @@ build-sql: ## Render SQL + conf templates → build/sql/ + build/conf/ (strict)
 	    S3_USE_SSL="$(S3_USE_SSL)" S3_PATH_STYLE="$(S3_PATH_STYLE)" \
 	    AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
 	    AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
+	    AWS_REGION="$(AWS_REGION)" \
 	    python3 scripts/render_sql.py
 
 show-sql: ## Print rendered SQL files and the active config axes
@@ -236,19 +339,23 @@ show-sql: ## Print rendered SQL files and the active config axes
 # Topic Management
 # =============================================================================
 
+# Retention defaults — override in .env (TOPIC_RETENTION_MS / DLQ_RETENTION_MS)
+TOPIC_RETENTION_MS ?= 259200000
+DLQ_RETENTION_MS   ?= 604800000
+
 create-topics: ## Create broker topics (primary + Dead Letter Queue)
 ifeq ($(BROKER),redpanda)
 	$(COMPOSE) exec broker rpk topic create $(TOPIC) \
 		--brokers localhost:9092 \
 		--partitions 3 \
 		--replicas 1 \
-		--topic-config retention.ms=259200000 \
+		--topic-config retention.ms=$(TOPIC_RETENTION_MS) \
 		--topic-config cleanup.policy=delete || true
 	$(COMPOSE) exec broker rpk topic create $(DLQ_TOPIC) \
 		--brokers localhost:9092 \
 		--partitions 1 \
 		--replicas 1 \
-		--topic-config retention.ms=604800000 \
+		--topic-config retention.ms=$(DLQ_RETENTION_MS) \
 		--topic-config cleanup.policy=delete || true
 	@$(COMPOSE) exec broker rpk topic list --brokers localhost:9092
 else
@@ -258,7 +365,7 @@ else
 		--topic $(TOPIC) \
 		--partitions 3 \
 		--replication-factor 1 \
-		--config retention.ms=259200000 \
+		--config retention.ms=$(TOPIC_RETENTION_MS) \
 		--config cleanup.policy=delete
 	$(COMPOSE) exec broker /opt/kafka/bin/kafka-topics.sh \
 		--create --if-not-exists \
@@ -266,12 +373,12 @@ else
 		--topic $(DLQ_TOPIC) \
 		--partitions 1 \
 		--replication-factor 1 \
-		--config retention.ms=604800000 \
+		--config retention.ms=$(DLQ_RETENTION_MS) \
 		--config cleanup.policy=delete
 	@$(COMPOSE) exec broker /opt/kafka/bin/kafka-topics.sh \
 		--list --bootstrap-server localhost:9092
 endif
-	@echo "Topics created: $(TOPIC) (3 partitions) + $(DLQ_TOPIC) (DLQ, 7-day retention)"
+	@echo "Topics created: $(TOPIC) (3 partitions, $(TOPIC_RETENTION_MS)ms) + $(DLQ_TOPIC) (DLQ, $(DLQ_RETENTION_MS)ms)"
 
 # =============================================================================
 # Data Generation
@@ -279,11 +386,26 @@ endif
 
 generate: ## Produce all events to broker (burst mode)
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm data-generator
+	@$(MAKE) persist-run-metrics
 	@echo "Data generation complete."
 
 generate-limited: ## Produce 10k events for testing (smoke test)
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm -e MAX_EVENTS=10000 data-generator
+	@$(MAKE) persist-run-metrics
 	@echo "Limited data generation complete (10k events)."
+
+persist-run-metrics: ## Copy generator metrics volume -> build/run_metrics.json
+	@mkdir -p build
+	@TMP_FILE="$$(mktemp)"; \
+	if MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm --no-deps \
+	    --entrypoint python3 dbt \
+	    -c "import json; print(json.dumps(json.load(open('/metrics/latest.json'))))" > "$$TMP_FILE"; then \
+	    mv "$$TMP_FILE" build/run_metrics.json; \
+	    echo "Run metrics written: build/run_metrics.json"; \
+	else \
+	    rm -f "$$TMP_FILE"; \
+	    echo "WARN: unable to persist run metrics from /metrics/latest.json"; \
+	fi
 
 # =============================================================================
 # Flink SQL Processing
@@ -317,7 +439,7 @@ process-streaming: ## Start continuous streaming Bronze job (runs indefinitely)
 # Wait Gate (replaces sleep 15)
 # =============================================================================
 
-wait-for-silver: ## Poll Silver table via iceberg_scan until rows > 0 (90s timeout)
+wait-for-silver: ## Poll Silver via iceberg_scan until WAIT_FOR_SILVER_MIN_ROWS is met
 	MSYS_NO_PATHCONV=1 $(COMPOSE) run --rm \
 	    --entrypoint python3 dbt \
 	    /scripts/wait_for_iceberg.py
@@ -347,16 +469,7 @@ dbt-docs: ## Generate dbt documentation
 # Validation (4-stage smoke test)
 # =============================================================================
 
-validate: ## Run 4-stage smoke test (bash, no extra deps): health + jobs + rows + dbt
-	@BROKER="$(BROKER)" MODE="$(MODE)" STORAGE="$(STORAGE)" \
-	    CATALOG="$(CATALOG)" DLQ_TOPIC="$(DLQ_TOPIC)" DLQ_MAX="$(DLQ_MAX)" \
-	    WAREHOUSE="$(WAREHOUSE)" \
-	    DUCKDB_S3_ENDPOINT="$(DUCKDB_S3_ENDPOINT)" \
-	    DUCKDB_S3_USE_SSL="$(DUCKDB_S3_USE_SSL)" \
-	    AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
-	    AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
-	    COMPOSE_FILES="$(COMPOSE_FILES)" \
-	    bash scripts/validate.sh
+validate: validate-py ## Run 4-stage smoke test (typed Python validator)
 
 validate-py: ## Run 4-stage smoke test (Python via uv)
 	uv run python scripts/validate.py
@@ -395,12 +508,20 @@ ci: lint type test-unit ## Fast local pre-push check: lint + type + unit tests
 # Dataset Scaffold
 # =============================================================================
 
-scaffold: ## Generate SQL templates + dbt staging from a dataset manifest: make scaffold DATASET=taxi
+scaffold-validate: ## Validate datasets/<name>/dataset.yml schema: make scaffold-validate DATASET=taxi
 ifndef DATASET
 	@uv run python -c "import pathlib; datasets=[p.name for p in sorted(pathlib.Path('datasets').iterdir()) if p.is_dir() and not p.name.startswith('_')]; print('Usage: make scaffold DATASET=<name>\nAvailable datasets:\n' + '\n'.join('  ' + d for d in datasets))"
 	@exit 1
 endif
-	uv run python scripts/scaffold_dataset.py $(DATASET)
+	uv run python scripts/validate_manifest.py $(DATASET)
+
+scaffold: ## Generate SQL + dbt assets from manifest: make scaffold DATASET=taxi [MART_STUB=true]
+ifndef DATASET
+	@uv run python -c "import pathlib; datasets=[p.name for p in sorted(pathlib.Path('datasets').iterdir()) if p.is_dir() and not p.name.startswith('_')]; print('Usage: make scaffold DATASET=<name>\nAvailable datasets:\n' + '\n'.join('  ' + d for d in datasets))"
+	@exit 1
+endif
+	@$(MAKE) scaffold-validate DATASET=$(DATASET)
+	uv run python scripts/scaffold_dataset.py $(DATASET) $(if $(filter true TRUE 1 yes YES,$(MART_STUB)),--with-mart-stub)
 	@echo "Next: make build-sql"
 
 health: ## Quick health check of all services
@@ -452,12 +573,10 @@ benchmark: ## Full benchmark: down → up → topics → generate → process �
 	@START_TIME=$$(date +%s) && \
 	$(MAKE) down 2>/dev/null || true && \
 	$(MAKE) up && \
-	echo "Waiting for services to stabilize..." && \
-	sleep 15 && \
+	echo "Waiting for Flink Dashboard to become reachable..." && \
+	timeout $(BENCHMARK_SERVICE_READY_TIMEOUT_SECONDS) bash -c "until curl -sf http://localhost:8081/overview > /dev/null; do sleep $(BENCHMARK_POLL_SECONDS); done" && \
 	$(MAKE) create-topics && \
 	$(MAKE) generate-limited && \
-	echo "Waiting for Flink processing to catch up..." && \
-	sleep 10 && \
 	$(MAKE) process && \
 	$(MAKE) wait-for-silver && \
 	$(MAKE) dbt-build && \

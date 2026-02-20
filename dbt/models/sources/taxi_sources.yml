@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: raw_taxi
+    description: "NYC Yellow Taxi trips (TLC open data)"
+    loaded_at_field: pickup_datetime
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 48, period: hour}
+    tables:
+      - name: cleaned_taxi
+        description: "Silver layer table written by Flink: iceberg_catalog.silver.cleaned_trips"
+        config:
+          external_location: "iceberg_scan('s3://warehouse/silver/cleaned_trips', allow_moved_paths = true)"

@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: {{ source_name }}
+    description: "{{ description | replace('\"', '\\\"') }}"
+    loaded_at_field: {{ event_ts_silver_col }}
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 48, period: hour}
+    tables:
+      - name: {{ source_table_name }}
+        description: "Silver layer table written by Flink: iceberg_catalog.{{ silver_table }}"
+        config:
+          external_location: "iceberg_scan('s3://warehouse/{{ silver_schema }}/{{ silver_table_name }}', allow_moved_paths = true)"

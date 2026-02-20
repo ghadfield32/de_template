@@ -21,36 +21,36 @@ def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:
     results = []
 
     if cfg.BROKER == "redpanda":
-        results.append(_check_redpanda(compose_args))
+        results.append(_check_redpanda(compose_args, cfg.HEALTH_DOCKER_TIMEOUT_SECONDS))
     else:
-        results.append(_check_kafka(compose_args))
+        results.append(_check_kafka(compose_args, cfg.HEALTH_DOCKER_TIMEOUT_SECONDS))
 
     return results
 
 
-def _check_redpanda(compose_args: list[str]) -> CheckResult:
+def _check_redpanda(compose_args: list[str], timeout_seconds: int) -> CheckResult:
     try:
         result = subprocess.run(
             compose_args + ["exec", "-T", "broker", "rpk", "cluster", "health"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=timeout_seconds,
         )
-        healthy = "Healthy:  true" in result.stdout or "Healthy: true" in result.stdout
+        healthy = result.returncode == 0
         return CheckResult(
             stage=STAGE,
             name="Redpanda cluster",
             passed=healthy,
-            message="healthy" if healthy else "not healthy",
-            detail=result.stderr.strip() if not healthy else None,
+            message="healthy" if healthy else "not healthy (rpk cluster health returned non-zero)",
+            detail=(result.stdout + "\n" + result.stderr).strip()[:500] if not healthy else None,
         )
     except subprocess.TimeoutExpired:
-        return CheckResult(STAGE, "Redpanda cluster", False, "timed out (15s)")
+        return CheckResult(STAGE, "Redpanda cluster", False, f"timed out ({timeout_seconds}s)")
     except Exception as e:
         return CheckResult(STAGE, "Redpanda cluster", False, f"error: {e}")
 
 
-def _check_kafka(compose_args: list[str]) -> CheckResult:
+def _check_kafka(compose_args: list[str], timeout_seconds: int) -> CheckResult:
     try:
         result = subprocess.run(
             compose_args
@@ -65,7 +65,7 @@ def _check_kafka(compose_args: list[str]) -> CheckResult:
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=timeout_seconds,
         )
         passed = result.returncode == 0
         return CheckResult(
@@ -76,6 +76,6 @@ def _check_kafka(compose_args: list[str]) -> CheckResult:
             detail=result.stderr.strip() if not passed else None,
         )
     except subprocess.TimeoutExpired:
-        return CheckResult(STAGE, "Kafka cluster", False, "timed out (15s)")
+        return CheckResult(STAGE, "Kafka cluster", False, f"timed out ({timeout_seconds}s)")
     except Exception as e:
         return CheckResult(STAGE, "Kafka cluster", False, f"error: {e}")

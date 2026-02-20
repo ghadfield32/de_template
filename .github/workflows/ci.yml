@@ -41,3 +41,24 @@ jobs:
         run: |
           cp env/local.env .env
           uv run python scripts/render_sql.py
+
+      - name: Scaffold idempotency check
+        # Ensures scaffold output is deterministic and registry has no duplicate dataset entries.
+        run: |
+          cp env/local.env .env
+          make scaffold DATASET=taxi
+          make scaffold DATASET=taxi
+          uv run python - <<'PYEOF'
+          import yaml
+          from pathlib import Path
+
+          registry_path = Path("datasets/registry.yml")
+          payload = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+          datasets = payload.get("datasets", [])
+          names = [d.get("name") for d in datasets if isinstance(d, dict)]
+          duplicates = sorted({n for n in names if names.count(n) > 1})
+          if duplicates:
+              raise SystemExit(f"Duplicate registry dataset names: {', '.join(duplicates)}")
+          print(f"Registry OK: {len(names)} dataset entry(ies), no duplicates.")
+          PYEOF
+          git diff --exit-code

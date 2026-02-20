@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: stg_{{ name }}
+    description: "Staging model for {{ name }} Silver records."
+    columns:
+      - name: {{ surrogate_key_name }}
+        tests:
+          - not_null
+          - unique
+      - name: {{ event_ts_silver_col }}
+        tests:
+          - not_null
+      - name: {{ partition_date_col }}
+        tests:
+          - not_null
+{% for test in range_tests %}
+      - name: {{ test.column }}
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+{% if test.min_value is defined %}
+                min_value: {{ test.min_value }}
+{% endif %}
+{% if test.max_value is defined %}
+                max_value: {{ test.max_value }}
+{% endif %}
+                inclusive: {{ test.inclusive | lower }}
+              config:
+                severity: warn
+{% endfor %}

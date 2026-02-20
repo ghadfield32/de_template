@@ -15,7 +15,7 @@ SET 'table.dml-sync' = 'true';
 -- Silver table DDL
 -- Pattern: surrogate key (trip_id) first, partition DATE column last
 CREATE TABLE IF NOT EXISTS iceberg_catalog.silver.cleaned_trips (
-    taxi_id                   STRING,          -- MD5 surrogate key
+    trip_id                   STRING,          -- MD5 surrogate key
     vendor_id                       INT,
     pickup_datetime                 TIMESTAMP(3),
     dropoff_datetime                TIMESTAMP(3),
@@ -56,7 +56,7 @@ SELECT
         COALESCE(CAST(DOLocationID AS STRING), ''),
         COALESCE(CAST(fare_amount AS STRING), ''),
         COALESCE(CAST(total_amount AS STRING), '')
-    )) AS taxi_id,
+    )) AS trip_id,
     -- Column casts from bronze → silver
     CAST(VendorID AS INT)                             AS vendor_id,
     tpep_pickup_datetime                    AS pickup_datetime,

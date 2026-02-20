@@ -9,8 +9,8 @@ services:
     container_name: template-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # MinIO Console web UI
@@ -38,7 +38,7 @@ services:
     command:
       - -c
       - |
-        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin}
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}
         mc mb local/warehouse --ignore-existing
         mc anonymous set none local/warehouse
         echo "MinIO: warehouse bucket ready"

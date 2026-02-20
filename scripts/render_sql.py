@@ -67,15 +67,50 @@ def render_template(
     print(f"  rendered: {tmpl_path.name}  ->  {out_dir.name}/{out_name}")
 
 
+def assert_no_unresolved_placeholders(paths: list[pathlib.Path]) -> None:
+    """Fail if rendered artifacts still contain template placeholder tokens."""
+    findings: list[str] = []
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        content = path.read_text(encoding="utf-8")
+
+        shell_placeholders = sorted(set(re.findall(r"\$\{[^}]+\}", content)))
+        jinja_placeholders = sorted(set(re.findall(r"\{\{\s*[^}]+\s*\}\}", content)))
+        leftovers = shell_placeholders + jinja_placeholders
+        if leftovers:
+            snippet = ", ".join(leftovers[:5])
+            suffix = " ..." if len(leftovers) > 5 else ""
+            findings.append(f"{path}: {snippet}{suffix}")
+
+    if findings:
+        message = "\n".join(findings)
+        sys.exit(
+            "\nERROR: unresolved placeholders detected in rendered outputs:\n"
+            f"{message}\n"
+            "Fix your env/template wiring and rerun `make build-sql`.\n"
+        )
+
+
+def require_env_value(env: dict[str, str], key: str) -> str:
+    raw = env.get(key, "").strip()
+    if not raw:
+        sys.exit(
+            f"\nERROR: Missing required variable '{key}' for template rendering.\n"
+            "  Add it to your active .env profile and rerun `make build-sql`.\n"
+        )
+    return raw
+
+
 def main():
     """Render all SQL and config templates based on axis variables."""
     # Load .env + override with actual environment variables (env wins)
     env = load_env(".env")
     env.update(os.environ)  # OS environment takes precedence
 
-    catalog = env.get("CATALOG", "hadoop").strip().lower()
-    mode = env.get("MODE", "batch").strip().lower()
-    storage = env.get("STORAGE", "minio").strip().lower()
+    catalog = require_env_value(env, "CATALOG").lower()
+    mode = require_env_value(env, "MODE").lower()
+    storage = require_env_value(env, "STORAGE").lower()
 
     sql_tmpl_dir = pathlib.Path("flink/sql")
     conf_tmpl_dir = pathlib.Path("flink/conf")
@@ -91,11 +126,14 @@ def main():
     # -----------------------------------------------------------------------
 
     # Active catalog template (hadoop vs rest)
+    rendered_paths: list[pathlib.Path] = []
+
     if catalog == "rest":
         catalog_tmpl = sql_tmpl_dir / "00_catalog_rest.sql.tmpl"
     else:
         catalog_tmpl = sql_tmpl_dir / "00_catalog.sql.tmpl"
     render_template(catalog_tmpl, env, "00_catalog.sql", sql_out_dir)
+    rendered_paths.append(sql_out_dir / "00_catalog.sql")
 
     # Source reference template (kept for backward compat; source DDL now
     # lives inside 05_bronze_batch.sql.tmpl for Flink session reliability)
@@ -105,6 +143,7 @@ def main():
         source_tmpl = sql_tmpl_dir / "01_source.sql.tmpl"
     if source_tmpl.exists():
         render_template(source_tmpl, env, "01_source.sql", sql_out_dir)
+        rendered_paths.append(sql_out_dir / "01_source.sql")
 
     # Fixed SQL templates (always rendered)
     #   05_bronze_batch.sql.tmpl  → batch Bronze
@@ -119,6 +158,7 @@ def main():
         tmpl_path = sql_tmpl_dir / tmpl_name
         if tmpl_path.exists():
             render_template(tmpl_path, env, out_name, sql_out_dir)
+            rendered_paths.append(sql_out_dir / out_name)
         else:
             print(f"  skipped (not found): {tmpl_name}")
 
@@ -141,8 +181,25 @@ def main():
 
     if core_tmpl.exists():
         render_template(core_tmpl, env, "core-site.xml", conf_out_dir)
+        rendered_paths.append(conf_out_dir / "core-site.xml")
     else:
         print(f"  skipped (not found): {core_tmpl.name}")
+
+    # Flink runtime config (rendered to build/conf/config.yaml)
+    # STORAGE=minio -> explicit endpoint + credentials for local MinIO
+    # STORAGE!=minio -> endpoint + TLS + provider-chain compatible settings
+    if storage == "minio":
+        config_tmpl = conf_tmpl_dir / "config.minio.yaml.tmpl"
+    else:
+        config_tmpl = conf_tmpl_dir / "config.cloud.yaml.tmpl"
+
+    if config_tmpl.exists():
+        render_template(config_tmpl, env, "config.yaml", conf_out_dir)
+        rendered_paths.append(conf_out_dir / "config.yaml")
+    else:
+        print(f"  skipped (not found): {config_tmpl.name}")
+
+    assert_no_unresolved_placeholders(rendered_paths)
 
     print("\nAll templates rendered. build/conf/ and build/sql/ are ready.\n")
 

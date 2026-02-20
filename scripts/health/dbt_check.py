@@ -17,11 +17,11 @@ if TYPE_CHECKING:
 STAGE = "4-dbt-tests"
 
 
-def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:  # noqa: ARG001
-    return [_run_dbt_test(compose_args)]
+def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:
+    return [_run_dbt_test(compose_args, cfg.DBT_TEST_TIMEOUT_SECONDS)]
 
 
-def _run_dbt_test(compose_args: list[str]) -> CheckResult:
+def _run_dbt_test(compose_args: list[str], timeout_seconds: int) -> CheckResult:
     try:
         result = subprocess.run(
             compose_args
@@ -37,7 +37,7 @@ def _run_dbt_test(compose_args: list[str]) -> CheckResult:
             ],
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout_seconds,
         )
         passed = result.returncode == 0
         # Extract summary line from dbt output
@@ -62,6 +62,6 @@ def _run_dbt_test(compose_args: list[str]) -> CheckResult:
             else None,
         )
     except subprocess.TimeoutExpired:
-        return CheckResult(STAGE, "dbt test", False, "timed out (300s)")
+        return CheckResult(STAGE, "dbt test", False, f"timed out ({timeout_seconds}s)")
     except Exception as e:
         return CheckResult(STAGE, "dbt test", False, f"error: {e}")

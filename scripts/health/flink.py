@@ -24,14 +24,14 @@ FLINK_URL = "http://localhost:8081"
 
 def run_checks(cfg: Settings, compose_args: list[str]) -> list[CheckResult]:  # noqa: ARG001
     results = []
-    results.append(_check_dashboard_reachable())
-    results.extend(_check_job_state(cfg.MODE))
+    results.append(_check_dashboard_reachable(cfg.HEALTH_HTTP_TIMEOUT_SECONDS))
+    results.extend(_check_job_state(cfg.MODE, cfg.HEALTH_HTTP_TIMEOUT_SECONDS))
     return results
 
 
-def _check_dashboard_reachable() -> CheckResult:
+def _check_dashboard_reachable(timeout_seconds: int) -> CheckResult:
     try:
-        with urllib.request.urlopen(f"{FLINK_URL}/overview", timeout=5) as resp:
+        with urllib.request.urlopen(f"{FLINK_URL}/overview", timeout=timeout_seconds) as resp:
             data = json.loads(resp.read())
             version = data.get("flink-version", "?")
             return CheckResult(
@@ -52,10 +52,10 @@ def _check_dashboard_reachable() -> CheckResult:
         return CheckResult(STAGE_INFRA, "Flink Dashboard", False, f"error: {e}")
 
 
-def _check_job_state(mode: str) -> list[CheckResult]:
+def _check_job_state(mode: str, timeout_seconds: int) -> list[CheckResult]:
     results = []
     try:
-        with urllib.request.urlopen(f"{FLINK_URL}/jobs/overview", timeout=5) as resp:
+        with urllib.request.urlopen(f"{FLINK_URL}/jobs/overview", timeout=timeout_seconds) as resp:
             data = json.loads(resp.read())
     except Exception as e:
         return [CheckResult(STAGE_JOBS, "Flink jobs", False, f"could not query API: {e}")]
@@ -80,7 +80,9 @@ def _check_job_state(mode: str) -> list[CheckResult]:
             jid = job.get("jid", "?")
             short_id = jid[:8]
             try:
-                with urllib.request.urlopen(f"{FLINK_URL}/jobs/{jid}", timeout=5) as resp:
+                with urllib.request.urlopen(
+                    f"{FLINK_URL}/jobs/{jid}", timeout=timeout_seconds
+                ) as resp:
                     detail = json.loads(resp.read())
                 restarts = detail.get("numRestarts", 0)
                 results.append(
@@ -91,8 +93,15 @@ def _check_job_state(mode: str) -> list[CheckResult]:
                         f"{restarts} restart(s)" if restarts > 0 else "0 restarts (stable)",
                     )
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                results.append(
+                    CheckResult(
+                        STAGE_JOBS,
+                        f"Job {short_id}... stability",
+                        False,
+                        f"could not read restart metrics: {exc}",
+                    )
+                )
     else:
         results.append(
             CheckResult(

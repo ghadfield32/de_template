@@ -21,6 +21,7 @@ from config.settings import Settings
 def _minio_kwargs(**overrides):
     base = dict(
         STORAGE="minio",
+        WAREHOUSE="s3a://warehouse/",
         S3_ENDPOINT="http://minio:9000",
         MINIO_ROOT_USER="minioadmin",
         MINIO_ROOT_PASSWORD="minioadmin",
@@ -38,6 +39,8 @@ def _minio_kwargs(**overrides):
 def _aws_kwargs(**overrides):
     base = dict(
         STORAGE="aws_s3",
+        WAREHOUSE="s3a://test-bucket/warehouse/",
+        S3_ENDPOINT="https://s3.amazonaws.com",
         TOPIC="test.topic",
         DLQ_TOPIC="test.topic.dlq",
         DATA_PATH="/data/test.parquet",
@@ -68,6 +71,10 @@ class TestAxisValidation:
         s = Settings(**_minio_kwargs(MODE="streaming_bronze"))
         assert s.MODE == "streaming_bronze"
 
+    def test_valid_generator_mode(self):
+        s = Settings(**_minio_kwargs(GENERATOR_MODE="realtime"))
+        assert s.GENERATOR_MODE == "realtime"
+
     def test_valid_rest_catalog(self):
         s = Settings(**_minio_kwargs(CATALOG="rest"))
         assert s.CATALOG == "rest"
@@ -83,6 +90,10 @@ class TestAxisValidation:
     def test_invalid_mode_raises(self):
         with pytest.raises(Exception):
             Settings(**_minio_kwargs(MODE="realtime"))
+
+    def test_invalid_generator_mode_raises(self):
+        with pytest.raises(Exception):
+            Settings(**_minio_kwargs(GENERATOR_MODE="streaming"))
 
     def test_invalid_catalog_raises(self):
         with pytest.raises(Exception):
@@ -101,12 +112,6 @@ class TestAxisValidation:
 
 
 class TestStorageCombos:
-    def test_minio_requires_s3_endpoint(self):
-        kwargs = _minio_kwargs()
-        del kwargs["S3_ENDPOINT"]
-        with pytest.raises(ValueError, match="S3_ENDPOINT"):
-            Settings(**kwargs)
-
     def test_minio_requires_minio_root_user(self):
         kwargs = _minio_kwargs()
         del kwargs["MINIO_ROOT_USER"]
@@ -123,10 +128,10 @@ class TestStorageCombos:
         with pytest.raises(ValueError, match="minio"):
             Settings(**_aws_kwargs(S3_ENDPOINT="http://minio:9000"))
 
-    def test_aws_without_endpoint_is_valid(self):
+    def test_aws_with_endpoint_is_valid(self):
         s = Settings(**_aws_kwargs())
         assert s.STORAGE == "aws_s3"
-        assert s.S3_ENDPOINT is None
+        assert s.S3_ENDPOINT == "https://s3.amazonaws.com"
 
     def test_gcs_storage_valid(self):
         s = Settings(**_aws_kwargs(STORAGE="gcs", DUCKDB_S3_ENDPOINT="storage.googleapis.com"))
@@ -160,13 +165,21 @@ class TestConvenienceProperties:
         s = Settings(**_minio_kwargs(AWS_ACCESS_KEY_ID="mykey"))
         assert s.effective_s3_key == "mykey"
 
-    def test_effective_duckdb_endpoint_defaults_to_minio(self):
-        s = Settings(**_minio_kwargs(DUCKDB_S3_ENDPOINT=None))
-        assert s.effective_duckdb_endpoint == "minio:9000"
-
     def test_effective_duckdb_endpoint_uses_configured_value(self):
         s = Settings(**_minio_kwargs(DUCKDB_S3_ENDPOINT="s3.amazonaws.com"))
         assert s.effective_duckdb_endpoint == "s3.amazonaws.com"
+
+    def test_bronze_and_silver_table_paths_are_derived_from_config(self):
+        s = Settings(
+            **_minio_kwargs(
+                WAREHOUSE="s3a://warehouse/",
+                BRONZE_TABLE="bronze.events",
+                SILVER_TABLE="silver.events_clean",
+            )
+        )
+        assert s.bronze_table_path == "s3://warehouse/bronze/events"
+        assert s.silver_table_path == "s3://warehouse/silver/events_clean"
+        assert s.silver_metadata_glob == "s3://warehouse/silver/events_clean/metadata/*.json"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +195,53 @@ class TestDefaults:
     def test_max_events_defaults_to_zero(self):
         s = Settings(**_minio_kwargs())
         assert s.MAX_EVENTS == 0
+
+    def test_allow_empty_defaults_to_false(self):
+        s = Settings(**_minio_kwargs())
+        assert s.ALLOW_EMPTY is False
+
+    def test_wait_for_silver_min_rows_defaults_to_one(self):
+        s = Settings(**_minio_kwargs())
+        assert s.WAIT_FOR_SILVER_MIN_ROWS == 1
+
+    def test_allow_empty_parses_true_string(self):
+        s = Settings(**_minio_kwargs(ALLOW_EMPTY="true"))
+        assert s.ALLOW_EMPTY is True
+
+    def test_run_metrics_defaults(self):
+        s = Settings(**_minio_kwargs())
+        assert s.RUN_METRICS_MAX_AGE_MINUTES == 120
+        assert s.ALLOW_STALE_RUN_METRICS is False
+        assert s.REQUIRE_RUN_METRICS is True
+
+    def test_expected_dataset_name_falls_back_to_topic_prefix(self):
+        s = Settings(**_minio_kwargs(TOPIC="orders.raw_events", DATASET_NAME=None))
+        assert s.expected_dataset_name == "orders"
+
+    def test_expected_dataset_name_uses_explicit_setting(self):
+        s = Settings(**_minio_kwargs(DATASET_NAME="payments"))
+        assert s.expected_dataset_name == "payments"
+
+    def test_run_metrics_max_age_must_be_positive(self):
+        with pytest.raises(ValueError, match="must be >= 1"):
+            Settings(**_minio_kwargs(RUN_METRICS_MAX_AGE_MINUTES=0))
+
+    def test_bronze_completeness_ratio_must_be_in_0_1_range(self):
+        with pytest.raises(ValueError, match="BRONZE_COMPLETENESS_RATIO"):
+            Settings(**_minio_kwargs(BRONZE_COMPLETENESS_RATIO=1.5))
+
+    def test_wait_for_silver_poll_must_be_less_than_timeout(self):
+        with pytest.raises(ValueError, match="WAIT_FOR_SILVER_POLL_SECONDS"):
+            Settings(
+                **_minio_kwargs(
+                    WAIT_FOR_SILVER_TIMEOUT_SECONDS=30,
+                    WAIT_FOR_SILVER_POLL_SECONDS=30,
+                )
+            )
+
+    def test_wait_for_silver_min_rows_must_be_non_negative(self):
+        with pytest.raises(ValueError, match="WAIT_FOR_SILVER_MIN_ROWS"):
+            Settings(**_minio_kwargs(WAIT_FOR_SILVER_MIN_ROWS=-1))
 
     def test_project_defaults(self):
         s = Settings(**_minio_kwargs())

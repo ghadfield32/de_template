@@ -37,10 +37,12 @@ cp env/local.env .env
 | `BROKER`            | yes      | `redpanda`         | `redpanda` or `kafka`                         |
 | `CATALOG`           | yes      | `hadoop`           | `hadoop` or `rest`                            |
 | `STORAGE`           | yes      | `minio`            | `minio`, `aws_s3`, `gcs`, or `azure`          |
-| `MODE`              | yes      | `batch`            | `batch` or `streaming_bronze`                 |
+| `MODE`              | yes      | `batch`            | Flink pipeline mode: `batch` or `streaming_bronze` |
+| `GENERATOR_MODE`    | no       | `burst`            | Generator send mode: `burst`, `realtime`, or `batch` |
 | `TOPIC`             | yes      | —                  | Primary Kafka topic                           |
 | `DLQ_TOPIC`         | yes      | —                  | Dead-letter topic                             |
 | `DATA_PATH`         | yes      | —                  | Container-internal Parquet path               |
+| `WAIT_FOR_SILVER_MIN_ROWS` | no | `1`              | Readiness threshold: wait until Silver rows >= this value |
 | `WAREHOUSE`         | yes      | `s3a://warehouse/` | Iceberg warehouse root (`s3a://` prefix)      |
 | `S3_ENDPOINT`       | minio    | —                  | Required for `STORAGE=minio`                  |
 | `DUCKDB_S3_ENDPOINT`| yes      | —                  | No `http://` prefix (DuckDB httpfs format)    |

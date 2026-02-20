@@ -21,7 +21,7 @@ import os
 import re
 from typing import Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -65,30 +65,56 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Topic
     # -------------------------------------------------------------------------
-    TOPIC: str = "taxi.raw_trips"
-    DLQ_TOPIC: str = "taxi.raw_trips.dlq"
+    TOPIC: str = Field(..., description="Primary Kafka topic")
+    DLQ_TOPIC: str = Field(..., description="Dead-letter topic")
     DLQ_MAX: int = 0
 
     # -------------------------------------------------------------------------
     # Data source
     # -------------------------------------------------------------------------
-    DATA_PATH: str = "/data/yellow_tripdata_2024-01.parquet"
+    DATA_PATH: str = Field(..., description="Generator input parquet path")
     MAX_EVENTS: int = 0
+    GENERATOR_MODE: Literal["burst", "realtime", "batch"] = "burst"
+    ALLOW_EMPTY: bool = False
+    DATASET_NAME: str | None = None
+    RUN_METRICS_MAX_AGE_MINUTES: int = 120
+    ALLOW_STALE_RUN_METRICS: bool = False
+    REQUIRE_RUN_METRICS: bool = True
     HOST_DATA_DIR: str | None = None
 
     # -------------------------------------------------------------------------
     # Warehouse (Flink S3A + Iceberg)
     # -------------------------------------------------------------------------
-    WAREHOUSE: str = "s3a://warehouse/"
-    S3_ENDPOINT: str | None = None
+    WAREHOUSE: str = Field(..., description="Iceberg warehouse root (s3a://...)")
+    S3_ENDPOINT: str = Field(..., description="Flink/Hadoop S3 endpoint")
     S3_USE_SSL: bool = False
     S3_PATH_STYLE: bool = True
 
     # -------------------------------------------------------------------------
     # DuckDB httpfs  (NO http:// prefix — DuckDB httpfs format requirement)
     # -------------------------------------------------------------------------
-    DUCKDB_S3_ENDPOINT: str | None = None
+    DUCKDB_S3_ENDPOINT: str = Field(..., description="DuckDB httpfs endpoint")
     DUCKDB_S3_USE_SSL: bool = False
+
+    # -------------------------------------------------------------------------
+    # Iceberg table contract
+    # -------------------------------------------------------------------------
+    BRONZE_TABLE: str = "bronze.raw_trips"
+    SILVER_TABLE: str = "silver.cleaned_trips"
+
+    # -------------------------------------------------------------------------
+    # Validation thresholds/timeouts (explicitly configurable)
+    # -------------------------------------------------------------------------
+    BRONZE_COMPLETENESS_RATIO: float = 0.95
+    WAIT_FOR_SILVER_MIN_ROWS: int = 1
+    WAIT_FOR_SILVER_TIMEOUT_SECONDS: int = 90
+    WAIT_FOR_SILVER_POLL_SECONDS: int = 5
+    HEALTH_HTTP_TIMEOUT_SECONDS: int = 5
+    HEALTH_DOCKER_TIMEOUT_SECONDS: int = 15
+    ICEBERG_QUERY_TIMEOUT_SECONDS: int = 90
+    ICEBERG_METADATA_TIMEOUT_SECONDS: int = 30
+    DLQ_READ_TIMEOUT_SECONDS: int = 10
+    DBT_TEST_TIMEOUT_SECONDS: int = 300
 
     # -------------------------------------------------------------------------
     # Credentials
@@ -115,39 +141,131 @@ class Settings(BaseSettings):
 
     @property
     def effective_s3_key(self) -> str:
-        return self.AWS_ACCESS_KEY_ID or self.MINIO_ROOT_USER or ""
+        return self.AWS_ACCESS_KEY_ID or ""
 
     @property
     def effective_s3_secret(self) -> str:
-        return self.AWS_SECRET_ACCESS_KEY or self.MINIO_ROOT_PASSWORD or ""
+        return self.AWS_SECRET_ACCESS_KEY or ""
 
     @property
     def effective_duckdb_endpoint(self) -> str:
-        return self.DUCKDB_S3_ENDPOINT or "minio:9000"
+        return self.DUCKDB_S3_ENDPOINT
+
+    @property
+    def expected_dataset_name(self) -> str:
+        if self.DATASET_NAME and self.DATASET_NAME.strip():
+            return self.DATASET_NAME.strip()
+        return self.TOPIC.split(".", 1)[0]
+
+    @property
+    def bronze_table_path(self) -> str:
+        schema, table = self.BRONZE_TABLE.split(".", 1)
+        return f"{self.warehouse_s3_path.rstrip('/')}/{schema}/{table}"
+
+    @property
+    def silver_table_path(self) -> str:
+        schema, table = self.SILVER_TABLE.split(".", 1)
+        return f"{self.warehouse_s3_path.rstrip('/')}/{schema}/{table}"
+
+    @property
+    def silver_metadata_glob(self) -> str:
+        return f"{self.silver_table_path}/metadata/*.json"
+
+    @property
+    def bronze_completeness_pct(self) -> float:
+        return self.BRONZE_COMPLETENESS_RATIO * 100.0
 
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
 
-    @field_validator("BROKER", "CATALOG", "STORAGE", "MODE", mode="before")
+    @field_validator("BROKER", "CATALOG", "STORAGE", "MODE", "GENERATOR_MODE", mode="before")
     @classmethod
     def strip_whitespace(cls, v: str) -> str:
         """Strip trailing whitespace that GNU make leaves after include .env."""
         return v.strip()
 
+    @field_validator(
+        "TOPIC",
+        "DLQ_TOPIC",
+        "DATA_PATH",
+        "WAREHOUSE",
+        "S3_ENDPOINT",
+        "DUCKDB_S3_ENDPOINT",
+        mode="before",
+    )
+    @classmethod
+    def require_non_empty_string(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("must be a string")
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("must be a non-empty string")
+        return stripped
+
+    @field_validator("BRONZE_TABLE", "SILVER_TABLE", mode="before")
+    @classmethod
+    def validate_table_name(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("must be a string")
+        table = v.strip()
+        parts = table.split(".")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError("must be in '<schema>.<table>' format")
+        ident = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        if not ident.match(parts[0]) or not ident.match(parts[1]):
+            raise ValueError("must be in '<schema>.<table>' format with valid identifiers")
+        return table
+
+    @field_validator("BRONZE_COMPLETENESS_RATIO")
+    @classmethod
+    def validate_completeness_ratio(cls, v: float) -> float:
+        if v <= 0 or v > 1:
+            raise ValueError("BRONZE_COMPLETENESS_RATIO must be > 0 and <= 1")
+        return v
+
+    @field_validator("WAIT_FOR_SILVER_MIN_ROWS")
+    @classmethod
+    def validate_wait_for_silver_min_rows(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("WAIT_FOR_SILVER_MIN_ROWS must be >= 0")
+        return v
+
+    @field_validator(
+        "RUN_METRICS_MAX_AGE_MINUTES",
+        "WAIT_FOR_SILVER_TIMEOUT_SECONDS",
+        "WAIT_FOR_SILVER_POLL_SECONDS",
+        "HEALTH_HTTP_TIMEOUT_SECONDS",
+        "HEALTH_DOCKER_TIMEOUT_SECONDS",
+        "ICEBERG_QUERY_TIMEOUT_SECONDS",
+        "ICEBERG_METADATA_TIMEOUT_SECONDS",
+        "DLQ_READ_TIMEOUT_SECONDS",
+        "DBT_TEST_TIMEOUT_SECONDS",
+    )
+    @classmethod
+    def validate_positive_ints(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
     @model_validator(mode="after")
     def validate_storage_combo(self) -> Settings:
         """Enforce rules between STORAGE axis and required credentials."""
         if self.STORAGE == "minio":
-            if not self.S3_ENDPOINT:
-                raise ValueError(
-                    "STORAGE=minio requires S3_ENDPOINT (e.g. http://minio:9000). "
-                    "Check your .env or run: make env-select ENV=env/local.env"
-                )
             if not self.MINIO_ROOT_USER:
                 raise ValueError("STORAGE=minio requires MINIO_ROOT_USER in .env")
             if not self.MINIO_ROOT_PASSWORD:
                 raise ValueError("STORAGE=minio requires MINIO_ROOT_PASSWORD in .env")
+            if not self.AWS_ACCESS_KEY_ID:
+                raise ValueError(
+                    "STORAGE=minio requires AWS_ACCESS_KEY_ID to be explicitly set "
+                    "(typically same value as MINIO_ROOT_USER)"
+                )
+            if not self.AWS_SECRET_ACCESS_KEY:
+                raise ValueError(
+                    "STORAGE=minio requires AWS_SECRET_ACCESS_KEY to be explicitly set "
+                    "(typically same value as MINIO_ROOT_PASSWORD)"
+                )
 
         if self.STORAGE == "aws_s3" and self.S3_ENDPOINT:
             if "minio" in self.S3_ENDPOINT.lower():
@@ -155,6 +273,14 @@ class Settings(BaseSettings):
                     "STORAGE=aws_s3 but S3_ENDPOINT contains 'minio'. "
                     "Use STORAGE=minio for local MinIO, or remove S3_ENDPOINT for AWS."
                 )
+
+        if not self.WAREHOUSE.startswith(("s3a://", "s3://")):
+            raise ValueError("WAREHOUSE must start with s3a:// or s3://")
+
+        if self.WAIT_FOR_SILVER_POLL_SECONDS >= self.WAIT_FOR_SILVER_TIMEOUT_SECONDS:
+            raise ValueError(
+                "WAIT_FOR_SILVER_POLL_SECONDS must be less than WAIT_FOR_SILVER_TIMEOUT_SECONDS"
+            )
 
         return self
 

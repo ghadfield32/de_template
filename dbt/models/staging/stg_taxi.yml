@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: stg_taxi
+    description: "Staging model for taxi Silver records."
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+          - unique
+      - name: pickup_datetime
+        tests:
+          - not_null
+      - name: pickup_date
+        tests:
+          - not_null
+      - name: passenger_count
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+              config:
+                severity: warn
+      - name: total_amount
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+              config:
+                severity: warn
+      - name: trip_distance_miles
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+              config:
+                severity: warn

@@ -13,7 +13,7 @@ import pathlib
 import pytest
 
 # conftest.py adds project root to sys.path
-from scripts.render_sql import load_env, render_template
+from scripts.render_sql import assert_no_unresolved_placeholders, load_env, render_template
 
 # ---------------------------------------------------------------------------
 # load_env
@@ -147,6 +147,22 @@ class TestRenderTemplate:
         result = (out_dir / "multi.sql").read_text()
         assert "iceberg_catalog" in result
         assert "${CATALOG}" not in result
+
+
+class TestPlaceholderScan:
+    def test_detects_unresolved_shell_placeholder(self, tmp_path):
+        out_file = tmp_path / "build.sql"
+        out_file.write_text("SELECT * FROM ${MISSING_TABLE};", encoding="utf-8")
+
+        with pytest.raises(SystemExit):
+            assert_no_unresolved_placeholders([out_file])
+
+    def test_detects_unresolved_jinja_placeholder(self, tmp_path):
+        out_file = tmp_path / "build.sql"
+        out_file.write_text("SELECT * FROM {{ unresolved_var }};", encoding="utf-8")
+
+        with pytest.raises(SystemExit):
+            assert_no_unresolved_placeholders([out_file])
 
 
 # ---------------------------------------------------------------------------

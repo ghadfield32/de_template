@@ -1,0 +1,12 @@
+version: 1
+datasets:
+- name: taxi
+  manifest: datasets/taxi/dataset.yml
+  scaffolded_at: null
+  outputs:
+  - flink/sql/05_bronze_batch.sql.tmpl
+  - flink/sql/06_silver.sql.tmpl
+  - flink/sql/07_bronze_streaming.sql.tmpl
+  - dbt/models/staging/stg_taxi.sql
+  - dbt/models/sources/taxi_sources.yml
+  - dbt/models/staging/stg_taxi.yml

@@ -15,7 +15,7 @@ SET 'table.dml-sync' = 'true';
 -- Silver table DDL
 -- Pattern: surrogate key (trip_id) first, partition DATE column last
 CREATE TABLE IF NOT EXISTS iceberg_catalog.{{ silver_table }} (
-    {{ name }}_id                   STRING,          -- MD5 surrogate key
+    {{ surrogate_key_name }}                   STRING,          -- MD5 surrogate key
 {% for col in columns %}
 {% if col.is_event_ts is not defined or not col.is_event_ts %}
     {{ (col.silver_name if col.silver_name is defined else col.name) | ljust(32) }}{{ col.silver_type }},
@@ -41,7 +41,7 @@ SELECT
         COALESCE(CAST({{ field }} AS STRING), ''){% if not loop.last %},{% endif %}
 
 {% endfor %}
-    )) AS {{ name }}_id,
+    )) AS {{ surrogate_key_name }},
     -- Column casts from bronze → silver
 {% for col in columns %}
 {% set sname = col.silver_name if col.silver_name is defined else col.name %}

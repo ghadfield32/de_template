@@ -1,0 +1,39 @@
+# =============================================================================
+# Flink 2.x runtime config (cloud object storage profiles)
+# Rendered by scripts/render_sql.py -> build/conf/config.yaml
+# =============================================================================
+
+# --- Cluster ---
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.bind-host: 0.0.0.0
+jobmanager.memory.process.size: 1g
+
+taskmanager.bind-host: 0.0.0.0
+taskmanager.host: flink-taskmanager
+taskmanager.memory.process.size: 2g
+taskmanager.numberOfTaskSlots: 4
+
+parallelism.default: 1
+
+# --- State Backend (RocksDB + object storage checkpoints) ---
+state.backend: rocksdb
+state.backend.incremental: true
+state.checkpoints.dir: ${WAREHOUSE}checkpoints
+state.savepoints.dir: ${WAREHOUSE}savepoints
+
+# --- S3A plugin (cloud endpoint + TLS) ---
+s3.endpoint: ${S3_ENDPOINT}
+s3.path.style.access: ${S3_PATH_STYLE}
+s3.connection.ssl.enabled: ${S3_USE_SSL}
+s3.region: ${AWS_REGION}
+
+# --- Iceberg + dynamic classloading ---
+classloader.check-leaked-classloader: false
+
+# --- Prometheus metrics ---
+metrics.reporter.prom.class: org.apache.flink.metrics.prometheus.PrometheusReporter
+metrics.reporter.prom.port: 9249
+
+# --- Logging ---
+env.log.level: INFO

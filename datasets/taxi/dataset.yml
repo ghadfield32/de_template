@@ -9,6 +9,7 @@
 # =============================================================================
 
 name: taxi
+manifest_version: 1
 description: "NYC Yellow Taxi trips (TLC open data)"
 
 # Topic names — kept as ${TOPIC} / ${DLQ_TOPIC} placeholders so render_sql.py
@@ -19,6 +20,17 @@ dlq_topic: "${DLQ_TOPIC}"
 # Iceberg table names (fully-qualified: <catalog_db>.<table>)
 bronze_table: bronze.raw_trips
 silver_table: silver.cleaned_trips
+
+surrogate_key_name: trip_id
+
+# Kafka message key field — routes same-entity events to the same partition.
+# PULocationID gives geographic affinity; use a ride/trip ID if available.
+# Set to null or omit to use null keys (round-robin, maximum throughput).
+key_field: PULocationID
+
+# Watermark lag (seconds) — late event tolerance for streaming Bronze.
+# NYC taxi data is low-latency; 10s is sufficient. Increase for slow producers.
+watermark_interval_seconds: 10
 
 # Event timestamp column (used for watermarking in Bronze DDL)
 # Must match the column name in the Kafka source (original Parquet case).

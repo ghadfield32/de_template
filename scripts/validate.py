@@ -8,7 +8,7 @@ Each stage delegates to a composable health module in scripts/health/.
 Stages:
   1. Infrastructure health  (broker + storage)
   2. Flink job state        (batch: FINISHED>=2 | streaming: RUNNING>=1)
-  3. Iceberg row counts     (bronze >= 95% of produced, silver > 0)
+  3. Iceberg row counts     (config-driven completeness + non-vacuous checks)
   4. dbt test               (all dbt tests pass)
 
 Usage:
@@ -22,12 +22,15 @@ Importable (used by integration tests):
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
+from datetime import UTC, datetime
 
 # Add project root to path so health modules and config are importable
 _ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
+RUN_METRICS_PATH = _ROOT / "build" / "run_metrics.json"
 
 try:
     from config.settings import Settings, load_settings
@@ -59,30 +62,188 @@ def build_compose_args(cfg: Settings) -> list[str]:
     return args
 
 
-def _read_events_produced(cfg: Settings, compose_args: list[str]) -> int:
-    """Read events_produced from generator metrics volume via dbt container."""
-    script = (
-        "import json, sys\n"
-        "try:\n"
-        "    data = json.load(open('/metrics/latest.json'))\n"
-        "    print(data.get('events', 0))\n"
-        "except Exception:\n"
-        "    print(0)\n"
-    )
+def _parse_timestamp(value: str) -> datetime | None:
+    """Parse ISO timestamps with either '+00:00' or trailing 'Z' UTC designator."""
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
     try:
-        import subprocess
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
 
-        result = subprocess.run(
-            compose_args
-            + ["run", "--rm", "--no-deps", "--entrypoint", "python3", "dbt", "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=15,
+
+def _validate_local_run_metrics(cfg: Settings) -> tuple[list[CheckResult], int | None]:
+    """
+    Validate build/run_metrics.json freshness and metadata.
+
+    Returns:
+      - a list of stage-3 CheckResult items
+      - events count if metrics are trusted for completeness checks, else None
+    """
+    if not RUN_METRICS_PATH.exists():
+        if cfg.REQUIRE_RUN_METRICS:
+            return [
+                CheckResult(
+                    "3-row-counts",
+                    "Run metrics file",
+                    False,
+                    "missing build/run_metrics.json (run make generate or make persist-run-metrics)",
+                )
+            ], None
+        return [
+            CheckResult(
+                "3-row-counts",
+                "Run metrics file",
+                True,
+                "missing build/run_metrics.json [allowed by REQUIRE_RUN_METRICS=false]",
+            )
+        ], None
+
+    checks: list[CheckResult] = []
+    try:
+        with open(RUN_METRICS_PATH, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        checks.append(
+            CheckResult(
+                "3-row-counts",
+                "Run metrics file",
+                False,
+                f"could not parse {RUN_METRICS_PATH.name}",
+                detail=str(exc),
+            )
         )
-        lines = result.stdout.strip().splitlines()
-        return int(lines[-1]) if lines and lines[-1].isdigit() else 0
-    except Exception:
-        return 0
+        return checks, None
+
+    events_raw = payload.get("events")
+    if isinstance(events_raw, (int, float)):
+        events = max(0, int(events_raw))
+    else:
+        checks.append(
+            CheckResult(
+                "3-row-counts",
+                "Run metrics events",
+                False,
+                "missing/invalid numeric 'events' field",
+            )
+        )
+        return checks, None
+
+    allow_stale = cfg.ALLOW_STALE_RUN_METRICS
+    usable = True
+
+    produced_at_raw = payload.get("produced_at")
+    produced_at = produced_at_raw if isinstance(produced_at_raw, str) else ""
+    produced_dt = _parse_timestamp(produced_at) if produced_at else None
+    if produced_dt is None:
+        passed = allow_stale
+        checks.append(
+            CheckResult(
+                "3-row-counts",
+                "Run metrics freshness",
+                passed,
+                "missing/invalid produced_at timestamp"
+                if not passed
+                else "missing/invalid produced_at timestamp [allowed by ALLOW_STALE_RUN_METRICS=true]",
+            )
+        )
+        usable = usable and passed
+    else:
+        age_minutes = (datetime.now(tz=UTC) - produced_dt.astimezone(UTC)).total_seconds() / 60.0
+        is_fresh = age_minutes <= cfg.RUN_METRICS_MAX_AGE_MINUTES
+        passed = is_fresh or allow_stale
+        checks.append(
+            CheckResult(
+                "3-row-counts",
+                "Run metrics freshness",
+                passed,
+                f"{age_minutes:.1f}m old (max {cfg.RUN_METRICS_MAX_AGE_MINUTES}m)"
+                if is_fresh
+                else (
+                    f"{age_minutes:.1f}m old exceeds max {cfg.RUN_METRICS_MAX_AGE_MINUTES}m"
+                    if not allow_stale
+                    else (
+                        f"{age_minutes:.1f}m old exceeds max {cfg.RUN_METRICS_MAX_AGE_MINUTES}m "
+                        "[allowed by ALLOW_STALE_RUN_METRICS=true]"
+                    )
+                ),
+            )
+        )
+        usable = usable and passed
+
+    expected_dataset = cfg.expected_dataset_name
+
+    topic_raw = payload.get("topic")
+    topic = topic_raw if isinstance(topic_raw, str) else ""
+    topic_match = topic == cfg.TOPIC
+    topic_passed = topic_match or allow_stale
+    checks.append(
+        CheckResult(
+            "3-row-counts",
+            "Run metrics topic",
+            topic_passed,
+            f"topic matches active config ({cfg.TOPIC})"
+            if topic_match
+            else (
+                f"metrics topic '{topic or '<missing>'}' != active '{cfg.TOPIC}'"
+                if not allow_stale
+                else (
+                    f"metrics topic '{topic or '<missing>'}' != active '{cfg.TOPIC}' "
+                    "[allowed by ALLOW_STALE_RUN_METRICS=true]"
+                )
+            ),
+        )
+    )
+    usable = usable and topic_passed
+
+    dataset_raw = payload.get("dataset")
+    dataset = dataset_raw.strip() if isinstance(dataset_raw, str) else ""
+    dataset_match = dataset == expected_dataset
+    dataset_passed = dataset_match or allow_stale
+    checks.append(
+        CheckResult(
+            "3-row-counts",
+            "Run metrics dataset",
+            dataset_passed,
+            f"dataset matches active config ({expected_dataset})"
+            if dataset_match
+            else (
+                f"metrics dataset '{dataset or '<missing>'}' != active '{expected_dataset}'"
+                if not allow_stale
+                else (
+                    f"metrics dataset '{dataset or '<missing>'}' != active '{expected_dataset}' "
+                    "[allowed by ALLOW_STALE_RUN_METRICS=true]"
+                )
+            ),
+        )
+    )
+    usable = usable and dataset_passed
+
+    data_path_raw = payload.get("data_path")
+    metrics_data_path = data_path_raw if isinstance(data_path_raw, str) else ""
+    data_path_match = metrics_data_path == cfg.DATA_PATH
+    data_path_passed = data_path_match or allow_stale
+    checks.append(
+        CheckResult(
+            "3-row-counts",
+            "Run metrics data path",
+            data_path_passed,
+            f"data path matches active config ({cfg.DATA_PATH})"
+            if data_path_match
+            else (
+                f"metrics data_path '{metrics_data_path or '<missing>'}' != active '{cfg.DATA_PATH}'"
+                if not allow_stale
+                else (
+                    f"metrics data_path '{metrics_data_path or '<missing>'}' != active '{cfg.DATA_PATH}' "
+                    "[allowed by ALLOW_STALE_RUN_METRICS=true]"
+                )
+            ),
+        )
+    )
+    usable = usable and data_path_passed
+
+    return checks, events if usable else None
 
 
 def run_validation(cfg: Settings | None = None) -> list[CheckResult]:
@@ -100,12 +261,37 @@ def run_validation(cfg: Settings | None = None) -> list[CheckResult]:
     # Stage 2: Flink jobs
     all_results.extend(health_flink.run_checks(cfg, compose_args))
 
-    # Stage 3: Row counts (needs events_produced from generator metrics)
-    events_produced = _read_events_produced(cfg, compose_args)
-    all_results.extend(health_iceberg.run_checks(cfg, compose_args, events_produced))
+    # Stage 3: Row counts + run metrics contract checks
+    metrics_results, events_from_local_metrics = _validate_local_run_metrics(cfg)
+    all_results.extend(metrics_results)
+    events_produced = events_from_local_metrics if events_from_local_metrics is not None else 0
+    all_results.extend(
+        health_iceberg.run_checks(
+            cfg,
+            compose_args,
+            events_produced=events_produced,
+            allow_empty=cfg.ALLOW_EMPTY,
+        )
+    )
 
     # Stage 4: dbt test
-    all_results.extend(health_dbt.run_checks(cfg, compose_args))
+    skip_dbt = any(
+        r.stage == "3-row-counts"
+        and r.name == "Silver rows"
+        and "allowed by ALLOW_EMPTY=true" in r.message
+        for r in all_results
+    )
+    if skip_dbt:
+        all_results.append(
+            CheckResult(
+                "4-dbt-tests",
+                "dbt test",
+                True,
+                "skipped because ALLOW_EMPTY=true and Silver is empty",
+            )
+        )
+    else:
+        all_results.extend(health_dbt.run_checks(cfg, compose_args))
 
     return all_results
 

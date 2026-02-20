@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS kafka_{{ name }}_raw (
 {% endfor %}
     -- Computed: event time for watermarking (ignored in batch mode but required by DDL)
     event_time AS TO_TIMESTAMP({{ event_ts_col }}, '{{ ts_format }}'),
-    WATERMARK FOR event_time AS event_time - INTERVAL '10' SECOND
+    WATERMARK FOR event_time AS event_time - INTERVAL '{{ watermark_interval_seconds }}' SECOND
 ) WITH (
     'connector'                     = 'kafka',
     'topic'                         = '{{ topic }}',

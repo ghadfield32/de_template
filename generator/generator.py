@@ -1,28 +1,31 @@
-"""Taxi trip event generator.
+"""Parquet event generator.
 
-Reads NYC Yellow Taxi parquet data and produces events to a Kafka-compatible
+Reads parquet data and produces events to a Kafka-compatible
 broker (Kafka or Redpanda). Supports three modes:
   - burst:    As fast as possible (benchmarking)
   - realtime: Simulates actual event-time spacing
   - batch:    Sends events in configurable batch sizes with delays
 
 Configuration via environment variables:
-  BROKER_URL       Kafka/Redpanda bootstrap servers  (default: localhost:9092)
-  TOPIC            Target topic name                  (default: taxi.raw_trips)
-  DLQ_TOPIC        Dead Letter Queue topic name       (default: taxi.raw_trips.dlq)
-  MODE             burst | realtime | batch           (default: burst)
-  RATE_LIMIT       Max events/sec in burst mode, 0=unlimited (default: 0)
+  BROKER_URL       Kafka/Redpanda bootstrap servers  (required)
+  TOPIC            Target topic name                  (required)
+  DLQ_TOPIC        Dead Letter Queue topic name       (required)
+  KEY_FIELD        Column name to use as message key   (default: empty = null keys)
+  GENERATOR_MODE   burst | realtime | batch           (default: burst)
+  RATE_LIMIT       Max events/sec; realtime defaults to 5000 if 0 (default: 0)
   BATCH_SIZE       Events per batch in batch mode     (default: 1000)
   BATCH_DELAY      Seconds between batches            (default: 1.0)
-  DATA_PATH        Path to parquet file               (default: /data/yellow_tripdata_2024-01.parquet)
+  DATA_PATH        Path to parquet file               (required)
   MAX_EVENTS       Stop after N events, 0=all         (default: 0)
-  METRICS_PATH     Write JSON metrics to this path    (default: /tmp/generator_metrics.json)
+  METRICS_PATH     Write JSON metrics to this path    (required)
+  DATASET          Dataset identifier for metrics      (default: topic prefix before '.')
+  RUN_ID           Optional run identifier             (default: generated UUIDv4)
   VALIDATE_SCHEMA  Validate rows against JSON Schema before producing (default: false)
-  SCHEMA_PATH      Path to JSON Schema file            (default: /schemas/taxi_trip.json)
+  SCHEMA_PATH      Path to JSON Schema file            (required when VALIDATE_SCHEMA=true)
 
 Usage:
     python generator.py
-    python generator.py --mode burst --broker localhost:9092
+    python generator.py --mode burst --broker broker:9092
 """
 
 import argparse
@@ -31,10 +34,16 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import orjson
 import pyarrow.parquet as pq
 from confluent_kafka import Producer
+
+
+def _arg_default(env_name: str) -> str | None:
+    raw = os.environ.get(env_name, "").strip()
+    return raw if raw else None
 
 
 def delivery_callback(err, msg):
@@ -116,6 +125,7 @@ def produce_burst(
     rows,
     rate_limit: int,
     validator,
+    key_field: str | None = None,
 ) -> tuple[int, int, float, float]:
     """Produce as fast as possible, optionally rate-limited.
 
@@ -135,7 +145,7 @@ def produce_burst(
                 producer.poll(0)
                 continue
 
-        key = str(row.get("PULocationID", "")).encode("utf-8")
+        key = str(row.get(key_field, "") or "").encode("utf-8") if key_field else None
         value = orjson.dumps(row)
         producer.produce(topic, value=value, key=key, callback=delivery_callback)
         count += 1
@@ -170,6 +180,7 @@ def produce_batch(
     batch_size: int,
     batch_delay: float,
     validator,
+    key_field: str | None = None,
 ) -> tuple[int, int, float, float]:
     """Produce in fixed-size batches with delays between them.
 
@@ -192,7 +203,7 @@ def produce_batch(
         batch_buffer.append(row)
         if len(batch_buffer) >= batch_size:
             for r in batch_buffer:
-                key = str(r.get("PULocationID", "")).encode("utf-8")
+                key = str(r.get(key_field, "") or "").encode("utf-8") if key_field else None
                 value = orjson.dumps(r)
                 producer.produce(topic, value=value, key=key, callback=delivery_callback)
                 count += 1
@@ -207,7 +218,7 @@ def produce_batch(
     # Final partial batch
     if batch_buffer:
         for r in batch_buffer:
-            key = str(r.get("PULocationID", "")).encode("utf-8")
+            key = str(r.get(key_field, "") or "").encode("utf-8") if key_field else None
             value = orjson.dumps(r)
             producer.produce(topic, value=value, key=key, callback=delivery_callback)
             count += 1
@@ -219,12 +230,43 @@ def produce_batch(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Taxi trip event generator")
-    parser.add_argument("--broker", default=os.environ.get("BROKER_URL", "localhost:9092"))
-    parser.add_argument("--topic", default=os.environ.get("TOPIC", "taxi.raw_trips"))
-    parser.add_argument("--dlq-topic", default=os.environ.get("DLQ_TOPIC", "taxi.raw_trips.dlq"))
+    parser = argparse.ArgumentParser(description="Parquet event generator")
+
+    broker_default = _arg_default("BROKER_URL")
+    topic_default = _arg_default("TOPIC")
+    dlq_default = _arg_default("DLQ_TOPIC")
+    data_path_default = _arg_default("DATA_PATH")
+    metrics_path_default = _arg_default("METRICS_PATH")
+
     parser.add_argument(
-        "--mode", default=os.environ.get("MODE", "burst"), choices=["burst", "realtime", "batch"]
+        "--broker",
+        default=broker_default,
+        required=broker_default is None,
+        help="Kafka bootstrap servers (or set BROKER_URL)",
+    )
+    parser.add_argument(
+        "--topic",
+        default=topic_default,
+        required=topic_default is None,
+        help="Primary topic (or set TOPIC)",
+    )
+    parser.add_argument(
+        "--dlq-topic",
+        default=dlq_default,
+        required=dlq_default is None,
+        help="DLQ topic (or set DLQ_TOPIC)",
+    )
+    parser.add_argument(
+        "--key-field",
+        default=_arg_default("KEY_FIELD"),
+        help="Column to use as Kafka message key (or set KEY_FIELD). Leave unset for null keys.",
+    )
+    mode_default = _arg_default("GENERATOR_MODE") or "burst"
+    parser.add_argument(
+        "--mode",
+        default=mode_default,
+        choices=["burst", "realtime", "batch"],
+        help="Generator mode (or set GENERATOR_MODE)",
     )
     parser.add_argument("--rate-limit", type=int, default=int(os.environ.get("RATE_LIMIT", "0")))
     parser.add_argument("--batch-size", type=int, default=int(os.environ.get("BATCH_SIZE", "1000")))
@@ -232,25 +274,46 @@ def main():
         "--batch-delay", type=float, default=float(os.environ.get("BATCH_DELAY", "1.0"))
     )
     parser.add_argument(
-        "--data-path", default=os.environ.get("DATA_PATH", "/data/yellow_tripdata_2024-01.parquet")
+        "--data-path",
+        default=data_path_default,
+        required=data_path_default is None,
+        help="Parquet path (or set DATA_PATH)",
     )
     parser.add_argument("--max-events", type=int, default=int(os.environ.get("MAX_EVENTS", "0")))
+    parser.add_argument(
+        "--metrics-path",
+        default=metrics_path_default,
+        required=metrics_path_default is None,
+        help="Metrics output path (or set METRICS_PATH)",
+    )
     parser.add_argument(
         "--validate-schema",
         action="store_true",
         default=os.environ.get("VALIDATE_SCHEMA", "false").lower() == "true",
     )
     parser.add_argument(
-        "--schema-path", default=os.environ.get("SCHEMA_PATH", "/schemas/taxi_trip.json")
+        "--schema-path", default=os.environ.get("SCHEMA_PATH", "")
     )
     args = parser.parse_args()
 
+    if args.validate_schema and not args.schema_path:
+        print(
+            "  [ERROR] VALIDATE_SCHEMA=true but SCHEMA_PATH is not set. "
+            "Set SCHEMA_PATH to your JSON Schema file path.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print("=" * 60)
-    print("  Taxi Trip Event Generator")
+    print("  Parquet Event Generator")
     print("=" * 60)
     print(f"  Broker:     {args.broker}")
     print(f"  Topic:      {args.topic}")
     print(f"  DLQ Topic:  {args.dlq_topic}")
+    if args.key_field:
+        print(f"  Key field:  {args.key_field}")
+    else:
+        print("  Key field:  [none — null keys, round-robin partitioning]")
     print(f"  Mode:       {args.mode}")
     print(f"  Data:       {args.data_path}")
     max_events_str = "all" if args.max_events == 0 else f"{args.max_events:,}"
@@ -275,16 +338,21 @@ def main():
 
     if args.mode == "burst":
         count, invalid, elapsed, rate = produce_burst(
-            producer, args.topic, args.dlq_topic, rows, args.rate_limit, validator
+            producer, args.topic, args.dlq_topic, rows, args.rate_limit, validator,
+            key_field=args.key_field,
         )
     elif args.mode == "batch":
         count, invalid, elapsed, rate = produce_batch(
-            producer, args.topic, args.dlq_topic, rows, args.batch_size, args.batch_delay, validator
+            producer, args.topic, args.dlq_topic, rows, args.batch_size, args.batch_delay,
+            validator, key_field=args.key_field,
         )
     else:
-        # realtime mode: burst with rate limiting to approximate real-time
+        # realtime mode: rate-limited burst to simulate event-time pacing.
+        # Uses RATE_LIMIT if set (> 0), otherwise defaults to 5000 events/sec.
+        realtime_rate = args.rate_limit if args.rate_limit > 0 else 5000
         count, invalid, elapsed, rate = produce_burst(
-            producer, args.topic, args.dlq_topic, rows, rate_limit=5000, validator=validator
+            producer, args.topic, args.dlq_topic, rows, rate_limit=realtime_rate,
+            validator=validator, key_field=args.key_field,
         )
 
     print()
@@ -298,7 +366,9 @@ def main():
     print("=" * 60)
 
     # Write metrics for validate.sh data-derived count checks
-    metrics_path = os.environ.get("METRICS_PATH", "/tmp/generator_metrics.json")
+    metrics_path = args.metrics_path
+    dataset_name = os.environ.get("DATASET", "").strip() or args.topic.split(".", 1)[0]
+    run_id = os.environ.get("RUN_ID", "").strip() or str(uuid4())
     metrics = {
         "events": count,
         "invalid": invalid,
@@ -306,7 +376,11 @@ def main():
         "events_per_second": round(rate, 1),
         "mode": args.mode,
         "broker": args.broker,
+        "dataset": dataset_name,
         "topic": args.topic,
+        "data_path": args.data_path,
+        "produced_at": datetime.now(tz=UTC).isoformat(),
+        "run_id": run_id,
         "schema_validation": args.validate_schema,
     }
     with open(metrics_path, "wb") as f:

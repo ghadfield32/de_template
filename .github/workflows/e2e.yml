@@ -102,15 +102,20 @@ jobs:
           MODE: batch
           STORAGE: minio
           CATALOG: hadoop
+          TOPIC: taxi.raw_trips
+          DATA_PATH: /data/taxi_fixture.parquet
+          DATASET_NAME: taxi
           DLQ_TOPIC: taxi.raw_trips.dlq
           DLQ_MAX: "0"
+          RUN_METRICS_MAX_AGE_MINUTES: "120"
+          ALLOW_STALE_RUN_METRICS: "false"
           WAREHOUSE: s3a://warehouse/
           DUCKDB_S3_ENDPOINT: minio:9000
           DUCKDB_S3_USE_SSL: "false"
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           COMPOSE_FILES: "-f infra/base.yml -f infra/broker.redpanda.yml -f infra/storage.minio.yml"
-        run: bash scripts/validate.sh
+        run: uv run python scripts/validate.py
 
       - name: Stop infrastructure
         if: always()

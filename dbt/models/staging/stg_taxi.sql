@@ -4,8 +4,6 @@
 -- =============================================================================
 -- Passthrough staging model: reads from Silver Iceberg via iceberg_scan(),
 -- applies minimal column aliases, and filters nulls on the event timestamp.
---
--- Update dbt/models/sources/sources.yml to point at your Silver path.
 -- =============================================================================
 
 with source as (
@@ -15,7 +13,7 @@ with source as (
 renamed as (
     select
         -- Surrogate key
-        taxi_id,
+        trip_id,
 
         -- Timestamps and partition
         pickup_datetime,
